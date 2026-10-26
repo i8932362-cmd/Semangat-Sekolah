@@ -1,6 +1,7 @@
 /**
  * Layanan API Frontend untuk Sistem Presensi Sekolah Multi-Tenant
  */
+import { handleLocalFallbackRequest } from './localFallbackDB';
 
 const SESSION_TOKEN_KEY = 'school_attendance_session_token';
 const SUPER_TOKEN_KEY = 'school_superadmin_session_token';
@@ -41,22 +42,44 @@ async function request(endpoint: string, options: RequestInit = {}) {
     headers.set('Authorization', `Bearer ${token}`);
   }
 
-  const response = await fetch(endpoint, {
-    ...options,
-    headers,
-  });
+  try {
+    const response = await fetch(endpoint, {
+      ...options,
+      headers,
+    });
 
-  const data = await response.json().catch(() => ({}));
+    const contentType = response.headers.get('content-type') || '';
+    const isJson = contentType.includes('application/json');
 
-  if (!response.ok) {
-    const errorMsg = data.error || data.message || `Terjadi kesalahan pada server (HTTP ${response.status})`;
-    const err: any = new Error(errorMsg);
-    err.data = data;
-    err.status = response.status;
-    throw err;
+    // Jika server mengembalikan 404/405 atau mengembalikan halaman HTML (Vercel SPA rewrite saat API serverless belum dikonfigurasi),
+    // aktifkan engine fallback lokal agar aplikasi tidak pernah error!
+    if ((response.status === 404 || response.status === 405 || !isJson) && endpoint.startsWith('/api/')) {
+      return await handleLocalFallbackRequest(endpoint, options);
+    }
+
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      const errorMsg = data.error || data.message || `Terjadi kesalahan pada server (HTTP ${response.status})`;
+      const err: any = new Error(errorMsg);
+      err.data = data;
+      err.status = response.status;
+      throw err;
+    }
+
+    return data;
+  } catch (networkOrServerError: any) {
+    // Jika koneksi gagal (misal server mati, offline, atau backend tidak tersedia di hosting static),
+    // alihkan otomatis ke database lokal in-browser
+    if (endpoint.startsWith('/api/')) {
+      try {
+        return await handleLocalFallbackRequest(endpoint, options);
+      } catch (localErr: any) {
+        throw localErr;
+      }
+    }
+    throw networkOrServerError;
   }
-
-  return data;
 }
 
 export const api = {

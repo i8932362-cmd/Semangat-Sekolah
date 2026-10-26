@@ -5,20 +5,94 @@ import fs from 'fs';
 import crypto from 'crypto';
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
-// Directory storage data lokal
-const DATA_DIR = path.resolve(process.cwd(), 'data');
-const TENANTS_DIR = path.resolve(DATA_DIR, 'tenants');
-const TENANTS_FILE = path.resolve(DATA_DIR, 'tenants.json');
-const SESSIONS_FILE = path.resolve(DATA_DIR, 'sessions.json');
-const SUPERADMIN_FILE = path.resolve(DATA_DIR, 'superadmin.json');
+// CORS & Preflight handler agar tidak ada kendala cross-origin saat di-deploy
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
+});
 
-if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-if (!fs.existsSync(TENANTS_DIR)) fs.mkdirSync(TENANTS_DIR, { recursive: true });
+// Directory storage data lokal dengan fallback aman ke /tmp untuk lingkungan Serverless (Vercel, AWS Lambda, dll.)
+function resolveDataPaths() {
+  let baseDir = path.resolve(process.cwd(), 'data');
+
+  try {
+    if (!fs.existsSync(baseDir)) {
+      fs.mkdirSync(baseDir, { recursive: true });
+    }
+    const testFile = path.resolve(baseDir, '.perm_test');
+    fs.writeFileSync(testFile, '1');
+    fs.unlinkSync(testFile);
+  } catch (err) {
+    // Read-only filesystem (misal di Vercel serverless / Lambda), gunakan /tmp
+    baseDir = path.resolve('/tmp', 'attendance_data');
+    if (!fs.existsSync(baseDir)) {
+      try {
+        fs.mkdirSync(baseDir, { recursive: true });
+      } catch (e) {
+        // ignore
+      }
+    }
+  }
+
+  const tenantsDir = path.resolve(baseDir, 'tenants');
+  if (!fs.existsSync(tenantsDir)) {
+    try {
+      fs.mkdirSync(tenantsDir, { recursive: true });
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  // Jika fallback ke /tmp, salin file bawaan dari repo jika tersedia
+  const origDataDir = path.resolve(process.cwd(), 'data');
+  if (baseDir !== origDataDir && fs.existsSync(origDataDir)) {
+    try {
+      const origTenants = path.resolve(origDataDir, 'tenants.json');
+      const destTenants = path.resolve(baseDir, 'tenants.json');
+      if (fs.existsSync(origTenants) && !fs.existsSync(destTenants)) {
+        fs.copyFileSync(origTenants, destTenants);
+      }
+      const origSuper = path.resolve(origDataDir, 'superadmin.json');
+      const destSuper = path.resolve(baseDir, 'superadmin.json');
+      if (fs.existsSync(origSuper) && !fs.existsSync(destSuper)) {
+        fs.copyFileSync(origSuper, destSuper);
+      }
+      const origTenantsDir = path.resolve(origDataDir, 'tenants');
+      if (fs.existsSync(origTenantsDir)) {
+        const files = fs.readdirSync(origTenantsDir);
+        for (const file of files) {
+          const src = path.resolve(origTenantsDir, file);
+          const dst = path.resolve(tenantsDir, file);
+          if (!fs.existsSync(dst)) {
+            fs.copyFileSync(src, dst);
+          }
+        }
+      }
+    } catch (e) {
+      // ignore copy errors
+    }
+  }
+
+  return {
+    DATA_DIR: baseDir,
+    TENANTS_DIR: tenantsDir,
+    TENANTS_FILE: path.resolve(baseDir, 'tenants.json'),
+    SESSIONS_FILE: path.resolve(baseDir, 'sessions.json'),
+    SUPERADMIN_FILE: path.resolve(baseDir, 'superadmin.json'),
+  };
+}
+
+const { DATA_DIR, TENANTS_DIR, TENANTS_FILE, SESSIONS_FILE, SUPERADMIN_FILE } = resolveDataPaths();
 
 // Helper hash password
 function hashPassword(password: string, salt: string): string {
@@ -54,7 +128,11 @@ function getSuperadminConfig() {
 }
 
 function saveSuperadminConfig(config: any) {
-  fs.writeFileSync(SUPERADMIN_FILE, JSON.stringify(config, null, 2));
+  try {
+    fs.writeFileSync(SUPERADMIN_FILE, JSON.stringify(config, null, 2));
+  } catch (e) {
+    console.warn('Gagal menyimpan superadmin config ke disk, tetap di memori:', e);
+  }
 }
 
 // Format waktu Asia/Jakarta
@@ -126,15 +204,19 @@ function initializeDefaultData() {
         createdAt: getJakartaTime(),
       },
     ];
-    fs.writeFileSync(TENANTS_FILE, JSON.stringify(defaultTenants, null, 2));
+    try {
+      fs.writeFileSync(TENANTS_FILE, JSON.stringify(defaultTenants, null, 2));
 
-    // Siapkan data internal untuk SMPN 1
-    const smpn1Data = createInitialTenantData('sch-smpn1', 'SMP Negeri 1 Nusantara');
-    fs.writeFileSync(path.resolve(TENANTS_DIR, 'sch-smpn1.json'), JSON.stringify(smpn1Data, null, 2));
+      // Siapkan data internal untuk SMPN 1
+      const smpn1Data = createInitialTenantData('sch-smpn1', 'SMP Negeri 1 Nusantara');
+      fs.writeFileSync(path.resolve(TENANTS_DIR, 'sch-smpn1.json'), JSON.stringify(smpn1Data, null, 2));
 
-    // Siapkan data internal untuk SMAN 2
-    const sman2Data = createInitialTenantData('sch-sman2', 'SMA Negeri 2 Bangsa');
-    fs.writeFileSync(path.resolve(TENANTS_DIR, 'sch-sman2.json'), JSON.stringify(sman2Data, null, 2));
+      // Siapkan data internal untuk SMAN 2
+      const sman2Data = createInitialTenantData('sch-sman2', 'SMA Negeri 2 Bangsa');
+      fs.writeFileSync(path.resolve(TENANTS_DIR, 'sch-sman2.json'), JSON.stringify(sman2Data, null, 2));
+    } catch (e) {
+      console.warn('Gagal menulis data default ke disk, tetap berjalan di memori:', e);
+    }
   }
 }
 
@@ -330,7 +412,11 @@ function getTenantsList() {
 }
 
 function saveTenantsList(list: any[]) {
-  fs.writeFileSync(TENANTS_FILE, JSON.stringify(list, null, 2));
+  try {
+    fs.writeFileSync(TENANTS_FILE, JSON.stringify(list, null, 2));
+  } catch (e) {
+    console.warn('Gagal menyimpan tenants list ke disk, tetap di memori:', e);
+  }
 }
 
 function getTenantData(tenantId: string): any {
@@ -451,14 +537,22 @@ function getTenantData(tenantId: string): any {
   }
 
   if (modified) {
-    fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+    try {
+      fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+    } catch (e) {
+      console.warn(`Gagal memperbarui schema data sekolah ${tenantId} ke disk:`, e);
+    }
   }
   return data;
 }
 
 function saveTenantData(tenantId: string, data: any) {
-  const filePath = path.resolve(TENANTS_DIR, `${tenantId}.json`);
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+  try {
+    const filePath = path.resolve(TENANTS_DIR, `${tenantId}.json`);
+    fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+  } catch (e) {
+    console.warn(`Gagal menyimpan data sekolah ${tenantId} ke disk, tetap di memori:`, e);
+  }
 }
 
 // In-memory & disk-persisted sessions map
@@ -2853,9 +2947,19 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.resolve(process.cwd(), 'dist');
-    app.use(express.static(distPath));
+    if (fs.existsSync(distPath)) {
+      app.use(express.static(distPath));
+    }
     app.get('*', (req, res) => {
-      res.sendFile(path.resolve(distPath, 'index.html'));
+      if (req.path.startsWith('/api')) {
+        return res.status(404).json({ success: false, error: 'API route not found' });
+      }
+      const indexPath = path.resolve(distPath, 'index.html');
+      if (fs.existsSync(indexPath)) {
+        res.sendFile(indexPath);
+      } else {
+        res.status(200).send('Presensi Sekolah Backend Running. Please run npm run build to serve the frontend.');
+      }
     });
   }
 
@@ -2864,4 +2968,13 @@ async function startServer() {
   });
 }
 
-startServer();
+// Export Express app untuk Serverless deployment (Vercel, AWS Lambda, dll.)
+export { app, startServer };
+export default app;
+
+// Hanya jalankan listener otomatis jika bukan dalam mode Vercel Serverless
+if (process.env.VERCEL !== '1' && !process.env.AWS_LAMBDA_FUNCTION_NAME) {
+  startServer().catch((err) => {
+    console.error('Gagal menjalankan server:', err);
+  });
+}
