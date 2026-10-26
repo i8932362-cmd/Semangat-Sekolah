@@ -1,0 +1,14 @@
+[
+  {
+    "token": "sess-d8c58d0ac95093736537f040a9177820669502787f851f7d",
+    "tenantId": "sch-smpn1",
+    "createdAt": 1792817313055
+  },
+  {
+    "token": "super-80c13e2a5fce12b410e828da9e3e18ec308fd5dea5eeb0c4",
+    "tenantId": "global",
+    "isSuperAdmin": true,
+    "userRole": "superadmin",
+    "createdAt": 1792817456521
+  }
+]
