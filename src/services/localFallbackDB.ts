@@ -380,7 +380,8 @@ export async function handleLocalFallbackRequest(
   // 3. POST /api/auth/superadmin-login
   if (pathOnly === '/api/auth/superadmin-login' && method === 'POST') {
     const { superPassword } = body;
-    if (superPassword !== db.superadminPassword && superPassword !== 'superadmin123') {
+    const currentPass = (db.superadminPassword || 'superadmin123').trim();
+    if ((superPassword || '').trim() !== currentPass) {
       throw new Error('Sandi Superadmin tidak valid.');
     }
     const superToken = `super-local-${Date.now()}`;
@@ -400,14 +401,15 @@ export async function handleLocalFallbackRequest(
   // 3.B POST /api/superadmin/change-password
   if (pathOnly === '/api/superadmin/change-password' && method === 'POST') {
     const { currentPassword, newPassword } = body;
-    if (currentPassword !== db.superadminPassword && currentPassword !== 'superadmin123') {
+    const currentPass = (db.superadminPassword || 'superadmin123').trim();
+    if ((currentPassword || '').trim() !== currentPass) {
       throw new Error('Sandi Superadmin saat ini salah.');
     }
     db.superadminPassword = newPassword.trim();
     saveLocalDB(db);
     return {
       success: true,
-      message: 'Sandi Superadmin berhasil diperbarui.',
+      message: 'Sandi Superadmin berhasil diperbarui. Sandi default lama tidak lagi berlaku.',
     };
   }
 
@@ -444,8 +446,8 @@ export async function handleLocalFallbackRequest(
     if (role === 'wali_kelas') {
       const cls = tData.classes.find((c) => c.id === classId);
       if (!cls) throw new Error('Kelas tidak ditemukan.');
-      const expPass = cls.waliKelasPassword || rolePasswords.defaultWaliKelas || 'wali123';
-      if (password !== expPass && password !== 'wali123' && password !== '123456') {
+      const expPass = (cls.waliKelasPassword || rolePasswords.defaultWaliKelas || 'wali123').trim();
+      if ((password || '').trim() !== expPass) {
         throw new Error(`Kata sandi wali kelas untuk kelas ${cls.name} tidak sesuai.`);
       }
       const teacherName = name && name.trim() ? name.trim() : (cls.waliKelasName || `Wali Kelas ${cls.name}`);
@@ -468,7 +470,8 @@ export async function handleLocalFallbackRequest(
     }
 
     if (role === 'kesiswaan') {
-      if (password !== rolePasswords.kesiswaan && password !== 'kesiswaan123') {
+      const expPass = (rolePasswords.kesiswaan || 'kesiswaan123').trim();
+      if ((password || '').trim() !== expPass) {
         throw new Error('Kata sandi kesiswaan tidak sesuai.');
       }
       const user = {
@@ -487,7 +490,8 @@ export async function handleLocalFallbackRequest(
     }
 
     if (role === 'kepala_sekolah') {
-      if (password !== rolePasswords.kepala_sekolah && password !== 'kepsek123') {
+      const expPass = (rolePasswords.kepala_sekolah || 'kepsek123').trim();
+      if ((password || '').trim() !== expPass) {
         throw new Error('Kata sandi kepala sekolah tidak sesuai.');
       }
       const user = {
@@ -507,7 +511,8 @@ export async function handleLocalFallbackRequest(
 
     if (role === 'admin') {
       if (!username) throw new Error('Username administrator wajib diisi.');
-      if (password !== rolePasswords.admin && password !== 'admin123' && password !== 'admin') {
+      const expPass = (rolePasswords.admin || 'admin123').trim();
+      if ((password || '').trim() !== expPass) {
         throw new Error('Kata sandi administrator tidak sesuai.');
       }
       const user = {

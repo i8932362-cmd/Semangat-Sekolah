@@ -11,6 +11,7 @@ interface SuperAdminModalProps {
 export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClose, onSchoolAdded }) => {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [superPassword, setSuperPassword] = useState('');
+  const [showSuperLoginPassword, setShowSuperLoginPassword] = useState(false);
   const [authError, setAuthError] = useState('');
   const [tenants, setTenants] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -255,7 +256,9 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
                 <p className="text-sm font-medium text-slate-700">
                   Masukkan sandi otoritas Superadmin untuk mengelola tenant sekolah.
                 </p>
-                <p className="text-xs text-slate-500 mt-1">Sandi default: <code className="bg-slate-100 px-1.5 py-0.5 rounded text-indigo-700 font-mono font-bold border border-slate-200">superadmin123</code></p>
+                <p className="text-xs text-slate-500 mt-1">
+                  Sandi awal: <code className="bg-slate-100 px-1.5 py-0.5 rounded text-indigo-700 font-mono font-bold border border-slate-200">superadmin123</code> <span className="text-[11px] text-slate-400">(tidak berlaku lagi jika sudah pernah diubah)</span>
+                </p>
               </div>
 
               {authError && (
@@ -267,15 +270,50 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
 
               <form onSubmit={handleSuperLogin} className="space-y-4">
                 <div>
-                  <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-2">Sandi Superadmin</label>
-                  <input
-                    type="password"
-                    value={superPassword}
-                    onChange={(e) => setSuperPassword(e.target.value)}
-                    placeholder="Masukkan sandi superadmin..."
-                    className="w-full px-3.5 py-2.5 bg-white border border-slate-300 rounded-xl text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-600"
-                    autoFocus
-                  />
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-700">
+                      Sandi Superadmin
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => setShowSuperLoginPassword(!showSuperLoginPassword)}
+                      className="text-xs text-indigo-600 hover:text-indigo-800 font-semibold flex items-center gap-1 cursor-pointer transition"
+                    >
+                      {showSuperLoginPassword ? (
+                        <>
+                          <EyeOff className="w-3.5 h-3.5" />
+                          <span>Sembunyikan Sandi</span>
+                        </>
+                      ) : (
+                        <>
+                          <Eye className="w-3.5 h-3.5" />
+                          <span>Tampilkan Sandi</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                  <div className="relative">
+                    <input
+                      type={showSuperLoginPassword ? 'text' : 'password'}
+                      value={superPassword}
+                      onChange={(e) => setSuperPassword(e.target.value)}
+                      placeholder="Masukkan sandi superadmin..."
+                      className="w-full pl-3.5 pr-11 py-2.5 bg-white border border-slate-300 rounded-xl text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-600 transition"
+                      autoFocus
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowSuperLoginPassword(!showSuperLoginPassword)}
+                      className="absolute inset-y-0 right-0 pr-3.5 flex items-center text-slate-400 hover:text-slate-700 cursor-pointer transition"
+                      aria-label={showSuperLoginPassword ? 'Sembunyikan sandi' : 'Tampilkan sandi'}
+                    >
+                      {showSuperLoginPassword ? (
+                        <EyeOff className="w-4 h-4" />
+                      ) : (
+                        <Eye className="w-4 h-4" />
+                      )}
+                    </button>
+                  </div>
                 </div>
                 <button
                   type="submit"

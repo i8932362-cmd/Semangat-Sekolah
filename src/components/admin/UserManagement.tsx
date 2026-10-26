@@ -241,8 +241,12 @@ export const UserManagement: React.FC = () => {
               Pengaturan Kata Sandi Peran (Role Access Passwords)
             </h3>
             <p className="text-xs text-slate-600 mt-0.5">
-              Admin mengatur sandi login untuk Wali Kelas, Kesiswaan, Kepala Sekolah, dan Administrator. (Petugas Presensi bebas sandi).
+              Admin mengatur sandi login untuk Wali Kelas, Kesiswaan, Kepala Sekolah, dan Administrator.
             </p>
+            <div className="mt-2 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-50 border border-amber-200 text-[11px] font-semibold text-amber-900">
+              <Shield className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+              <span>Keamanan Aktif: Begitu sandi peran diperbarui di sini, sandi default sebelumnya otomatis TIDAK BERLAKU LAGI.</span>
+            </div>
           </div>
           {passwordFeedback && (
             <span className="text-xs font-bold text-emerald-800 bg-emerald-50 border border-emerald-300 px-3 py-1 rounded-xl flex items-center gap-1.5 animate-fade-in">

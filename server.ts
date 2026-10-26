@@ -771,7 +771,9 @@ app.post('/api/auth/superadmin-login', (req: Request, res: Response) => {
 
   const config = getSuperadminConfig();
   const calculatedHash = hashPassword(superPassword, config.salt);
-  if (calculatedHash !== config.passwordHash && superPassword !== 'superadmin123') {
+  
+  // Jika sandi superadmin diubah, config.passwordHash akan diperbarui dan sandi default TIDAK LAGI BERLAKU
+  if (calculatedHash !== config.passwordHash) {
     return res.status(401).json({ success: false, error: 'Sandi Superadmin tidak valid.' });
   }
 
@@ -815,17 +817,20 @@ app.post('/api/superadmin/change-password', (req: Request, res: Response) => {
 
     const config = getSuperadminConfig();
     const currentHash = hashPassword(currentPassword, config.salt);
-    if (currentHash !== config.passwordHash && currentPassword !== 'superadmin123') {
+    
+    // Verifikasi sandi saat ini harus tepat cocok dengan hash tersimpan
+    if (currentHash !== config.passwordHash) {
       return res.status(401).json({ success: false, error: 'Sandi Superadmin saat ini salah.' });
     }
 
     const newSalt = generateSalt();
     config.salt = newSalt;
     config.passwordHash = hashPassword(newPassword.trim(), newSalt);
+    config.isChanged = true;
     config.updatedAt = getJakartaTime();
     saveSuperadminConfig(config);
 
-    res.json({ success: true, message: 'Sandi Superadmin berhasil diperbarui.' });
+    res.json({ success: true, message: 'Sandi Superadmin berhasil diperbarui. Sandi default tidak lagi berlaku.' });
   } catch (err: any) {
     console.error('Error change superadmin password:', err);
     res.status(500).json({ success: false, error: err.message || 'Gagal mengubah sandi superadmin.' });
@@ -862,13 +867,14 @@ app.post('/api/auth/internal-user', requireTenantAuth, (req: Request, res: Respo
     }
 
     const cfg = tenantData.konfigurasiSekolah || {};
-    const expectedPwd = cfg.rolePasswords?.admin || 'admin123';
+    const expectedPwd = (cfg.rolePasswords?.admin || 'admin123').trim();
     let isPassValid = false;
     if (targetUser.pinHash) {
       const hash = hashPassword(enteredPass, targetUser.salt);
       if (hash === targetUser.pinHash) isPassValid = true;
     }
-    if (!isPassValid && (enteredPass === expectedPwd || enteredPass === 'admin123' || enteredPass === '123456' || enteredPass === 'admin')) {
+    // Jika password peran diubah, default admin123 tidak lagi berlaku
+    if (enteredPass === expectedPwd) {
       isPassValid = true;
     }
     if (!isPassValid) {
@@ -922,9 +928,10 @@ app.post('/api/auth/verify-wali-kelas', requireTenantAuth, (req: Request, res: R
     return res.status(404).json({ success: false, error: 'Kelas yang dituju tidak ditemukan.' });
   }
 
-  // Bandingkan kata sandi kelas yang diatur admin
-  const expectedPassword = targetClass.waliKelasPassword || 'wali123';
-  if (password.trim() !== expectedPassword.trim()) {
+  const cfg = tenantData.konfigurasiSekolah || {};
+  // Bandingkan kata sandi kelas yang diatur admin; jika diubah, default tidak lagi berlaku
+  const expectedPassword = (targetClass.waliKelasPassword || cfg.rolePasswords?.defaultWaliKelas || 'wali123').trim();
+  if (password.trim() !== expectedPassword) {
     return res.status(401).json({ success: false, error: 'Kata sandi wali kelas salah untuk kelas ini.' });
   }
 
@@ -1005,8 +1012,8 @@ app.post('/api/auth/select-role', requireTenantAuth, (req: Request, res: Respons
       return res.status(404).json({ success: false, error: 'Kelas tidak ditemukan.' });
     }
 
-    const expectedPwd = targetClass.waliKelasPassword || cfg.rolePasswords?.defaultWaliKelas || 'wali123';
-    if (password.trim() !== expectedPwd.trim() && password.trim() !== '123456') {
+    const expectedPwd = (targetClass.waliKelasPassword || cfg.rolePasswords?.defaultWaliKelas || 'wali123').trim();
+    if (password.trim() !== expectedPwd) {
       return res.status(401).json({ success: false, error: `Kata sandi wali kelas untuk kelas ${targetClass.name} tidak sesuai.` });
     }
 
@@ -1042,8 +1049,8 @@ app.post('/api/auth/select-role', requireTenantAuth, (req: Request, res: Respons
       return res.status(400).json({ success: false, error: 'Masukkan kata sandi kesiswaan.' });
     }
 
-    const expectedPwd = cfg.rolePasswords?.kesiswaan || 'kesiswaan123';
-    if (password.trim() !== expectedPwd.trim() && password.trim() !== '123456') {
+    const expectedPwd = (cfg.rolePasswords?.kesiswaan || 'kesiswaan123').trim();
+    if (password.trim() !== expectedPwd) {
       return res.status(401).json({ success: false, error: 'Kata sandi kesiswaan tidak sesuai.' });
     }
 
@@ -1080,8 +1087,8 @@ app.post('/api/auth/select-role', requireTenantAuth, (req: Request, res: Respons
       return res.status(400).json({ success: false, error: 'Masukkan kata sandi kepala sekolah.' });
     }
 
-    const expectedPwd = cfg.rolePasswords?.kepala_sekolah || 'kepsek123';
-    if (password.trim() !== expectedPwd.trim() && password.trim() !== '123456') {
+    const expectedPwd = (cfg.rolePasswords?.kepala_sekolah || 'kepsek123').trim();
+    if (password.trim() !== expectedPwd) {
       return res.status(401).json({ success: false, error: 'Kata sandi kepala sekolah tidak sesuai.' });
     }
 
@@ -1134,13 +1141,14 @@ app.post('/api/auth/select-role', requireTenantAuth, (req: Request, res: Respons
       });
     }
 
-    const expectedPwd = cfg.rolePasswords?.admin || 'admin123';
+    const expectedPwd = (cfg.rolePasswords?.admin || 'admin123').trim();
     let isPassValid = false;
     if (matchedAdmin && matchedAdmin.pinHash) {
-      const hash = hashPassword(password, matchedAdmin.salt);
+      const hash = hashPassword(password.trim(), matchedAdmin.salt);
       if (hash === matchedAdmin.pinHash) isPassValid = true;
     }
-    if (!isPassValid && (password.trim() === expectedPwd.trim() || password.trim() === 'admin123' || password.trim() === '123456' || password.trim() === 'admin')) {
+    // Jika cocok dengan password peran administrator yang dikonfigurasi
+    if (password.trim() === expectedPwd) {
       isPassValid = true;
     }
 
@@ -1200,19 +1208,45 @@ app.post('/api/admin/role-passwords', requireTenantAuth, (req: Request, res: Res
   const { admin, kesiswaan, kepala_sekolah, defaultWaliKelas } = req.body;
 
   if (!tenantData.konfigurasiSekolah) tenantData.konfigurasiSekolah = {};
-  tenantData.konfigurasiSekolah.rolePasswords = {
-    admin: admin ? admin.trim() : (tenantData.konfigurasiSekolah.rolePasswords?.admin || 'admin123'),
-    kesiswaan: kesiswaan ? kesiswaan.trim() : (tenantData.konfigurasiSekolah.rolePasswords?.kesiswaan || 'kesiswaan123'),
-    kepala_sekolah: kepala_sekolah ? kepala_sekolah.trim() : (tenantData.konfigurasiSekolah.rolePasswords?.kepala_sekolah || 'kepsek123'),
-    defaultWaliKelas: defaultWaliKelas ? defaultWaliKelas.trim() : (tenantData.konfigurasiSekolah.rolePasswords?.defaultWaliKelas || 'wali123'),
+  
+  const currentRolePw = tenantData.konfigurasiSekolah.rolePasswords || {
+    admin: 'admin123',
+    kesiswaan: 'kesiswaan123',
+    kepala_sekolah: 'kepsek123',
+    defaultWaliKelas: 'wali123',
   };
 
+  const updatedRolePw = {
+    admin: admin ? admin.trim() : currentRolePw.admin,
+    kesiswaan: kesiswaan ? kesiswaan.trim() : currentRolePw.kesiswaan,
+    kepala_sekolah: kepala_sekolah ? kepala_sekolah.trim() : currentRolePw.kepala_sekolah,
+    defaultWaliKelas: defaultWaliKelas ? defaultWaliKelas.trim() : currentRolePw.defaultWaliKelas,
+  };
+
+  tenantData.konfigurasiSekolah.rolePasswords = updatedRolePw;
+
+  // Sinkronkan juga pinHash pada pengguna internal yang sesuai agar konsisten
+  if (tenantData.pengguna) {
+    tenantData.pengguna.forEach((u: any) => {
+      if (u.role === 'admin' && admin) {
+        u.salt = generateSalt();
+        u.pinHash = hashPassword(admin.trim(), u.salt);
+      } else if (u.role === 'kesiswaan' && kesiswaan) {
+        u.salt = generateSalt();
+        u.pinHash = hashPassword(kesiswaan.trim(), u.salt);
+      } else if (u.role === 'kepala_sekolah' && kepala_sekolah) {
+        u.salt = generateSalt();
+        u.pinHash = hashPassword(kepala_sekolah.trim(), u.salt);
+      }
+    });
+  }
+
   saveTenantData(tenantId, tenantData);
-  addAuditLog(tenantId, 'UPDATE_ROLE_PASSWORDS', 'Keamanan', session.userId || 'admin', 'Admin', 'Pembaruan kata sandi peran sekolah');
+  addAuditLog(tenantId, 'UPDATE_ROLE_PASSWORDS', 'Keamanan', session.userId || 'admin', 'Admin', 'Pembaruan kata sandi peran sekolah. Sandi default lama tidak lagi berlaku.');
 
   res.json({
     success: true,
-    message: 'Kata sandi peran sekolah berhasil diperbarui oleh Administrator.',
+    message: 'Kata sandi peran sekolah berhasil diperbarui. Sandi default lama tidak lagi berlaku.',
     passwords: tenantData.konfigurasiSekolah.rolePasswords,
   });
 });
