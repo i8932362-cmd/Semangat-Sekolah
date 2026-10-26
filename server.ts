@@ -2938,8 +2938,8 @@ async function startServer() {
         middlewareMode: true,
         port: PORT,
         host: '0.0.0.0',
-        hmr: process.env.DISABLE_HMR !== 'true',
-        watch: process.env.DISABLE_HMR === 'true' ? null : {},
+        hmr: false,
+        watch: null,
       },
       appType: 'spa',
     });

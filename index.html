@@ -25,8 +25,21 @@
     <!-- Social Meta Tags -->
     <meta property="og:title" content="Sistem Presensi Sekolah Multi-Tenant" />
     <meta property="og:description" content="Aplikasi presensi sekolah multi-tenant berbasis Google Drive dan Google Sheets dengan login sekolah tanpa email, manajemen hak akses, presensi manual, barcode/RFID, izin kamar mandi, dan rekapitulasi data." />
-    <meta property="og:type" content="website" />
-    <meta name="twitter:card" content="summary_large_image" />
+    <!-- Error boundary for dev environment iframe proxy -->
+    <script>
+      window.addEventListener('error', function (e) {
+        if (e && e.message && (e.message.includes('WebSocket') || e.message.includes('closed without opened'))) {
+          e.stopImmediatePropagation();
+          e.preventDefault();
+        }
+      });
+      window.addEventListener('unhandledrejection', function (e) {
+        if (e && e.reason && String(e.reason).includes('WebSocket')) {
+          e.stopImmediatePropagation();
+          e.preventDefault();
+        }
+      });
+    </script>
   </head>
   <body class="overscroll-none antialiased">
     <div id="root"></div>
