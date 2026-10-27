@@ -10,13 +10,24 @@ import {
   DoorOpen,
   UserX,
   Search,
+  BarChart3,
+  ListFilter,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { api } from '../../services/api';
+import { InternalUser, SchoolClass, TenantSchool } from '../../types';
+import { AttendanceMonitoringSection } from '../monitoring/AttendanceMonitoringSection';
 
-export const KesiswaanView: React.FC = () => {
+interface KesiswaanViewProps {
+  tenant?: TenantSchool | null;
+  currentUser?: InternalUser | null;
+}
+
+export const KesiswaanView: React.FC<KesiswaanViewProps> = ({ tenant, currentUser }) => {
+  const [activeTab, setActiveTab] = useState<'monitoring' | 'discipline'>('monitoring');
+  const [classes, setClasses] = useState<SchoolClass[]>([]);
   const [selectedDate, setSelectedDate] = useState(() => {
     return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Jakarta' }).format(new Date());
   });
@@ -25,6 +36,21 @@ export const KesiswaanView: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [filterType, setFilterType] = useState<'all' | 'alpha' | 'terlambat' | 'bathroom'>('all');
   const [isLoading, setIsLoading] = useState(false);
+
+  useEffect(() => {
+    loadClasses();
+  }, []);
+
+  const loadClasses = async () => {
+    try {
+      const res = await api.getMasterData();
+      if (res.success && res.data?.kelas) {
+        setClasses(res.data.kelas);
+      }
+    } catch (e) {
+      console.warn('Gagal memuat kelas di kesiswaan:', e);
+    }
+  };
 
   useEffect(() => {
     loadDisciplineData();
@@ -203,46 +229,91 @@ export const KesiswaanView: React.FC = () => {
   return (
     <div className="space-y-6">
       {/* Header Bar */}
-      <div className="bg-white p-4 sm:p-5 rounded-2xl border border-slate-200 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+      <div className="bg-white p-4 sm:p-5 rounded-3xl border border-slate-200 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
             <ShieldAlert className="w-5 h-5 text-indigo-600" />
-            Pemantauan Kesiswaan & Rekap Kedisiplinan
+            Pemantauan Kesiswaan & Kedisiplinan Siswa
           </h2>
           <p className="text-xs text-slate-700 font-medium mt-0.5">
-            Analisis Alpha lintas kelas, keterlambatan, dan pelanggaran batas durasi izin toilet
+            Analisis grafik presensi per siswa dan per kelas, pemantauan alpha, keterlambatan, dan pelanggaran izin toilet
           </p>
         </div>
-
-        <div className="flex flex-wrap items-center gap-2.5">
-          <div className="flex items-center gap-2 bg-slate-50 border border-slate-300 rounded-xl px-3 py-1.5 text-xs text-slate-800 shadow-2xs">
-            <Calendar className="w-3.5 h-3.5 text-indigo-600" />
-            <input
-              type="date"
-              value={selectedDate}
-              onChange={(e) => setSelectedDate(e.target.value)}
-              className="bg-transparent text-slate-900 font-bold focus:outline-none text-xs cursor-pointer"
-            />
-          </div>
-
-          <button
-            onClick={exportExcel}
-            className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center gap-1.5 transition cursor-pointer shadow-xs"
-          >
-            <Download className="w-3.5 h-3.5" />
-            <span>Ekspor Excel</span>
-          </button>
-
-          <button
-            onClick={exportPDF}
-            className="px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold flex items-center gap-1.5 transition cursor-pointer shadow-xs"
-            title="Unduh laporan kedisiplinan sebagai berkas PDF"
-          >
-            <FileText className="w-3.5 h-3.5" />
-            <span>Unduh PDF</span>
-          </button>
-        </div>
       </div>
+
+      {/* Navigasi Sub-Tab Kesiswaan */}
+      <div className="flex border-b border-slate-200 gap-2">
+        <button
+          type="button"
+          onClick={() => setActiveTab('monitoring')}
+          className={`pb-3 px-4 text-xs font-bold flex items-center gap-2 border-b-2 transition cursor-pointer ${
+            activeTab === 'monitoring'
+              ? 'border-indigo-600 text-indigo-700'
+              : 'border-transparent text-slate-700 hover:text-slate-900'
+          }`}
+        >
+          <BarChart3 className="w-4 h-4" />
+          <span>Grafik & Monitoring (Per Siswa & Per Kelas)</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab('discipline')}
+          className={`pb-3 px-4 text-xs font-bold flex items-center gap-2 border-b-2 transition cursor-pointer ${
+            activeTab === 'discipline'
+              ? 'border-indigo-600 text-indigo-700'
+              : 'border-transparent text-slate-700 hover:text-slate-900'
+          }`}
+        >
+          <ListFilter className="w-4 h-4" />
+          <span>Pelanggaran Kedisiplinan & Toilet Overdue</span>
+        </button>
+      </div>
+
+      {/* Tampilan Tab 1: Grafik & Monitoring Terpadu Kesiswaan */}
+      {activeTab === 'monitoring' && (
+        <AttendanceMonitoringSection
+          tenant={tenant || null}
+          currentUser={currentUser || null}
+          classes={classes}
+          defaultClassId="all"
+          allowAllClasses={true}
+          roleLabel="Kesiswaan"
+        />
+      )}
+
+      {/* Tampilan Tab 2: Pelanggaran Kedisiplinan & Toilet Overdue */}
+      {activeTab === 'discipline' && (
+        <div className="space-y-6">
+          <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2 bg-slate-50 border border-slate-300 rounded-xl px-3 py-1.5 text-xs text-slate-800 shadow-2xs">
+              <Calendar className="w-3.5 h-3.5 text-indigo-600" />
+              <input
+                type="date"
+                value={selectedDate}
+                onChange={(e) => setSelectedDate(e.target.value)}
+                className="bg-transparent text-slate-900 font-bold focus:outline-none text-xs cursor-pointer"
+              />
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                onClick={exportExcel}
+                className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center gap-1.5 transition cursor-pointer shadow-xs"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Ekspor Excel</span>
+              </button>
+
+              <button
+                onClick={exportPDF}
+                className="px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold flex items-center gap-1.5 transition cursor-pointer shadow-xs"
+                title="Unduh laporan kedisiplinan sebagai berkas PDF"
+              >
+                <FileText className="w-3.5 h-3.5" />
+                <span>Unduh PDF</span>
+              </button>
+            </div>
+          </div>
 
       {/* 3 Kartu Fokus Kedisiplinan */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
@@ -382,6 +453,8 @@ export const KesiswaanView: React.FC = () => {
           </table>
         </div>
       </div>
+        </div>
+      )}
     </div>
   );
 };

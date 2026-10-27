@@ -13,14 +13,19 @@ import {
   Filter,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
-import { InternalUser, SchoolClass } from '../../types';
+import { InternalUser, SchoolClass, TenantSchool } from '../../types';
 import { api } from '../../services/api';
+import { AttendanceMonitoringSection } from '../monitoring/AttendanceMonitoringSection';
+import { generateClassMonitoringPDF } from '../../utils/monitoringPdf';
+import { BarChart3, ListFilter } from 'lucide-react';
 
 interface WaliKelasViewProps {
   currentUser: InternalUser | null;
+  tenant?: TenantSchool | null;
 }
 
-export const WaliKelasView: React.FC<WaliKelasViewProps> = ({ currentUser }) => {
+export const WaliKelasView: React.FC<WaliKelasViewProps> = ({ currentUser, tenant }) => {
+  const [activeTab, setActiveTab] = useState<'monitoring' | 'daily'>('monitoring');
   const [classes, setClasses] = useState<SchoolClass[]>([]);
   const [targetClass, setTargetClass] = useState<SchoolClass | null>(null);
   const [isClassVerified, setIsClassVerified] = useState<boolean>(false);
@@ -158,6 +163,50 @@ export const WaliKelasView: React.FC<WaliKelasViewProps> = ({ currentUser }) => 
     XLSX.writeFile(wb, `Rekap_Presensi_${targetClass?.name}_${selectedDate}.xlsx`);
   };
 
+  const exportPDFDaily = () => {
+    if (records.length === 0) {
+      alert('Tidak ada data untuk diunduh sebagai PDF.');
+      return;
+    }
+
+    const studentSummaries = records.map((r) => ({
+      nis: r.studentNis || r.studentId || '-',
+      name: r.studentName || '-',
+      hadir: r.status === 'hadir' ? 1 : 0,
+      terlambat: r.status === 'terlambat' ? 1 : 0,
+      sakit: r.status === 'sakit' ? 1 : 0,
+      izin: r.status === 'izin' ? 1 : 0,
+      alpha: r.status === 'alpha' ? 1 : 0,
+      rate: r.status === 'hadir' || r.status === 'terlambat' ? 100 : 0,
+      statusNote: r.notes || (r.status === 'hadir' ? 'Tepat Waktu' : r.status),
+    }));
+
+    generateClassMonitoringPDF({
+      className: targetClass?.name || 'VII-A',
+      waliKelasName: targetClass?.waliKelasName || teacherNameInput || 'Wali Kelas',
+      timeframe: 'daily',
+      periodLabel: selectedDate,
+      stats: {
+        totalStudents: records.length,
+        hadir: summary.hadir,
+        terlambat: summary.terlambat,
+        sakit: summary.sakit,
+        izin: summary.izin,
+        alpha: summary.alpha,
+        attendanceRate: records.length > 0 ? Math.round(((summary.hadir + summary.terlambat) / records.length) * 100) : 0,
+      },
+      studentSummaries,
+      schoolInfo: {
+        name: tenant?.name,
+        npsn: tenant?.npsn,
+        address: tenant?.address,
+        phone: tenant?.phone,
+      },
+      signeeName: targetClass?.waliKelasName || teacherNameInput || 'Wali Kelas',
+      signeeRole: 'Wali Kelas',
+    });
+  };
+
   const handlePrint = () => {
     window.print();
   };
@@ -266,7 +315,7 @@ export const WaliKelasView: React.FC<WaliKelasViewProps> = ({ currentUser }) => 
   return (
     <div className="space-y-6">
       {/* Header Wali Kelas */}
-      <div className="bg-white p-4 sm:p-5 rounded-2xl border border-slate-200 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+      <div className="bg-white p-4 sm:p-5 rounded-3xl border border-slate-200 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <div className="flex items-center gap-2">
             <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-50 text-emerald-950 border border-emerald-300">
@@ -278,7 +327,7 @@ export const WaliKelasView: React.FC<WaliKelasViewProps> = ({ currentUser }) => 
           </div>
           <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2 mt-1">
             <GraduationCap className="w-5 h-5 text-indigo-600" />
-            Rekapitulasi Kelas {targetClass?.name}
+            Rekapitulasi & Monitoring Kelas {targetClass?.name}
           </h2>
           <p className="text-xs text-slate-700 font-medium mt-0.5">
             Wali Kelas: <span className="font-bold text-slate-950">{targetClass?.waliKelasName || teacherNameInput || 'Wali Kelas'}</span>
@@ -293,17 +342,6 @@ export const WaliKelasView: React.FC<WaliKelasViewProps> = ({ currentUser }) => 
           >
             Pindah Kelas
           </button>
-
-          {/* Pilih Tanggal */}
-          <div className="flex items-center gap-2 bg-slate-50 border border-slate-300 rounded-xl px-3 py-1.5 text-xs text-slate-800 shadow-2xs">
-            <Calendar className="w-3.5 h-3.5 text-indigo-600" />
-            <input
-              type="date"
-              value={selectedDate}
-              onChange={(e) => setSelectedDate(e.target.value)}
-              className="bg-transparent text-slate-900 font-bold focus:outline-none text-xs cursor-pointer"
-            />
-          </div>
 
           {/* Jika Admin yang membuka, izinkan ganti kelas langsung */}
           {currentUser?.role === 'admin' && (
@@ -325,24 +363,90 @@ export const WaliKelasView: React.FC<WaliKelasViewProps> = ({ currentUser }) => 
               </select>
             </div>
           )}
-
-          <button
-            onClick={exportExcel}
-            className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center gap-1.5 transition cursor-pointer shadow-xs"
-          >
-            <Download className="w-3.5 h-3.5" />
-            <span>Ekspor Excel</span>
-          </button>
-
-          <button
-            onClick={handlePrint}
-            className="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold border border-slate-300 flex items-center gap-1.5 transition cursor-pointer"
-          >
-            <Printer className="w-3.5 h-3.5 text-slate-700" />
-            <span>Cetak Rekap</span>
-          </button>
         </div>
       </div>
+
+      {/* Navigasi Sub-Tab Wali Kelas */}
+      <div className="flex border-b border-slate-200 gap-2">
+        <button
+          type="button"
+          onClick={() => setActiveTab('monitoring')}
+          className={`pb-3 px-4 text-xs font-bold flex items-center gap-2 border-b-2 transition cursor-pointer ${
+            activeTab === 'monitoring'
+              ? 'border-indigo-600 text-indigo-700'
+              : 'border-transparent text-slate-700 hover:text-slate-900'
+          }`}
+        >
+          <BarChart3 className="w-4 h-4" />
+          <span>Grafik & Monitoring (Per Siswa & Per Kelas)</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab('daily')}
+          className={`pb-3 px-4 text-xs font-bold flex items-center gap-2 border-b-2 transition cursor-pointer ${
+            activeTab === 'daily'
+              ? 'border-indigo-600 text-indigo-700'
+              : 'border-transparent text-slate-700 hover:text-slate-900'
+          }`}
+        >
+          <ListFilter className="w-4 h-4" />
+          <span>Rekapitulasi Harian Tanggal Tertentu</span>
+        </button>
+      </div>
+
+      {/* Tampilan Tab 1: Grafik & Monitoring Terpadu */}
+      {activeTab === 'monitoring' && (
+        <AttendanceMonitoringSection
+          tenant={tenant || null}
+          currentUser={currentUser}
+          classes={classes}
+          defaultClassId={targetClass?.id}
+          allowAllClasses={currentUser?.role === 'admin'}
+          roleLabel="Wali Kelas"
+        />
+      )}
+
+      {/* Tampilan Tab 2: Rincian Presensi Harian Tertentu */}
+      {activeTab === 'daily' && (
+        <div className="space-y-6">
+          <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2 bg-slate-50 border border-slate-300 rounded-xl px-3 py-1.5 text-xs text-slate-800 shadow-2xs">
+              <Calendar className="w-3.5 h-3.5 text-indigo-600" />
+              <input
+                type="date"
+                value={selectedDate}
+                onChange={(e) => setSelectedDate(e.target.value)}
+                className="bg-transparent text-slate-900 font-bold focus:outline-none text-xs cursor-pointer"
+              />
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                onClick={exportPDFDaily}
+                className="px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold flex items-center gap-1.5 transition cursor-pointer shadow-xs"
+                title="Unduh laporan presensi tanggal ini sebagai PDF resmi"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Unduh PDF Hari Ini</span>
+              </button>
+
+              <button
+                onClick={exportExcel}
+                className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center gap-1.5 transition cursor-pointer shadow-xs"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Ekspor Excel</span>
+              </button>
+
+              <button
+                onClick={handlePrint}
+                className="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold border border-slate-300 flex items-center gap-1.5 transition cursor-pointer"
+              >
+                <Printer className="w-3.5 h-3.5 text-slate-700" />
+                <span>Cetak Rekap</span>
+              </button>
+            </div>
+          </div>
 
       {/* Ringkasan Kehadiran Kelas */}
       <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
@@ -449,6 +553,8 @@ export const WaliKelasView: React.FC<WaliKelasViewProps> = ({ currentUser }) => 
           </table>
         </div>
       </div>
+        </div>
+      )}
     </div>
   );
 };

@@ -90,10 +90,15 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ schoolQuery, password }),
     }),
-  loginSuperadmin: (superPassword: string) =>
+  loginSuperadmin: (superPassword: string, superEmailOrUsername: string = 'presensiapp138@gmail.com') =>
     request('/api/auth/superadmin-login', {
       method: 'POST',
-      body: JSON.stringify({ superPassword }),
+      body: JSON.stringify({
+        superPassword,
+        superEmail: superEmailOrUsername,
+        identifier: superEmailOrUsername,
+        username: superEmailOrUsername,
+      }),
     }),
   selectInternalUser: (username: string, pin?: string, password?: string) =>
     request('/api/auth/internal-user', {
@@ -248,11 +253,32 @@ export const api = {
     }),
 
   // Presensi
-  getPresensi: (date?: string, classId?: string, sessionId?: string) => {
+  getPresensi: (
+    dateOrParams?: string | { date?: string; startDate?: string; endDate?: string; classId?: string; studentId?: string; sessionId?: string },
+    classId?: string,
+    sessionId?: string
+  ) => {
     const params = new URLSearchParams();
-    if (date) params.append('date', date);
-    if (classId) params.append('classId', classId);
-    if (sessionId) params.append('sessionId', sessionId);
+    if (typeof dateOrParams === 'string') {
+      if (dateOrParams) params.append('date', dateOrParams);
+      if (classId) params.append('classId', classId);
+      if (sessionId) params.append('sessionId', sessionId);
+    } else if (dateOrParams && typeof dateOrParams === 'object') {
+      if (dateOrParams.date) params.append('date', dateOrParams.date);
+      if (dateOrParams.startDate) params.append('startDate', dateOrParams.startDate);
+      if (dateOrParams.endDate) params.append('endDate', dateOrParams.endDate);
+      if (dateOrParams.classId) params.append('classId', dateOrParams.classId);
+      if (dateOrParams.studentId) params.append('studentId', dateOrParams.studentId);
+      if (dateOrParams.sessionId) params.append('sessionId', dateOrParams.sessionId);
+    }
+    return request(`/api/presensi?${params.toString()}`);
+  },
+  getPresensiRange: (startDate: string, endDate: string, classId?: string, studentId?: string) => {
+    const params = new URLSearchParams();
+    params.append('startDate', startDate);
+    params.append('endDate', endDate);
+    if (classId && classId !== 'all') params.append('classId', classId);
+    if (studentId && studentId !== 'all') params.append('studentId', studentId);
     return request(`/api/presensi?${params.toString()}`);
   },
   recordPresensi: (payload: {
@@ -337,6 +363,15 @@ export const api = {
   getAuditLogs: () => request('/api/admin/audit-logs'),
 
   // Superadmin
+  // Pengaturan Peraturan Sekolah (Terisolasi per-Tenant)
+  getSchoolRules: () => request('/api/admin/rules'),
+  saveSchoolRules: (rules: any) =>
+    request('/api/admin/rules', {
+      method: 'POST',
+      body: JSON.stringify(rules),
+    }),
+
+  // Superadmin
   getSuperadminTenants: (tokenOverride?: string) => {
     const superToken = (typeof tokenOverride === 'string' && tokenOverride.trim().length > 0)
       ? tokenOverride.trim()
@@ -350,10 +385,13 @@ export const api = {
   createTenant: (payload: {
     name: string;
     code: string;
+    email?: string;
     npsn?: string;
     password: string;
     address?: string;
     phone?: string;
+    driveFolderId?: string;
+    spreadsheetId?: string;
   }) => {
     const superToken = getSuperToken();
     const headers: Record<string, string> = {};
@@ -362,6 +400,29 @@ export const api = {
     }
     return request('/api/superadmin/tenants', {
       method: 'POST',
+      headers,
+      body: JSON.stringify(payload),
+    });
+  },
+  updateTenant: (tenantId: string, payload: {
+    name?: string;
+    code?: string;
+    email?: string;
+    npsn?: string;
+    address?: string;
+    phone?: string;
+    driveFolderId?: string;
+    spreadsheetId?: string;
+    newPassword?: string;
+    isActive?: boolean;
+  }) => {
+    const superToken = getSuperToken();
+    const headers: Record<string, string> = {};
+    if (superToken && typeof superToken === 'string') {
+      headers['Authorization'] = `Bearer ${superToken}`;
+    }
+    return request(`/api/superadmin/tenants/${tenantId}`, {
+      method: 'PUT',
       headers,
       body: JSON.stringify(payload),
     });
@@ -378,6 +439,30 @@ export const api = {
       body: JSON.stringify({ isActive, newPassword }),
     });
   },
+  verifySchoolEmail: (tenantId: string, isVerified: boolean = true) => {
+    const superToken = getSuperToken();
+    const headers: Record<string, string> = {};
+    if (superToken && typeof superToken === 'string') {
+      headers['Authorization'] = `Bearer ${superToken}`;
+    }
+    return request(`/api/superadmin/tenants/${tenantId}/verify-email`, {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({ isVerified }),
+    });
+  },
+  autoCreateGoogleDatabase: (tenantId: string, accessToken: string) => {
+    const superToken = getSuperToken();
+    const headers: Record<string, string> = {};
+    if (superToken && typeof superToken === 'string') {
+      headers['Authorization'] = `Bearer ${superToken}`;
+    }
+    return request(`/api/superadmin/tenants/${tenantId}/auto-create-database`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ accessToken }),
+    });
+  },
   deleteTenant: (tenantId: string) => {
     const superToken = getSuperToken();
     const headers: Record<string, string> = {};
@@ -389,7 +474,7 @@ export const api = {
       headers,
     });
   },
-  changeSuperadminPassword: (currentPassword: string, newPassword: string) => {
+  changeSuperadminPassword: (currentPassword: string, newPassword: string, newEmail?: string, newUsername?: string) => {
     const superToken = getSuperToken();
     const headers: Record<string, string> = {};
     if (superToken && typeof superToken === 'string') {
@@ -398,7 +483,7 @@ export const api = {
     return request('/api/superadmin/change-password', {
       method: 'POST',
       headers,
-      body: JSON.stringify({ currentPassword, newPassword }),
+      body: JSON.stringify({ currentPassword, newPassword, newEmail, newUsername }),
     });
   },
 };

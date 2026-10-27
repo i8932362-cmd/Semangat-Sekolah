@@ -15,6 +15,11 @@ export interface TenantSchool {
   name: string;
   code: string;
   npsn: string;
+  email?: string;
+  databaseEmail?: string;
+  isEmailVerified?: boolean;
+  emailVerifiedAt?: string;
+  emailVerifiedBy?: string;
   address?: string;
   phone?: string;
   isActive: boolean;

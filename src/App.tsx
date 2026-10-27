@@ -34,12 +34,31 @@ export default function App() {
 
   useEffect(() => {
     checkActiveSession();
+
+    // Multi-device real-time sync: sinkronisasi berkala dan saat tab difokuskan
+    const syncInterval = setInterval(() => {
+      if (document.visibilityState === 'visible' && getSessionToken()) {
+        checkActiveSession(true);
+      }
+    }, 20000);
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && getSessionToken()) {
+        checkActiveSession(true);
+      }
+    };
+
+    window.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      clearInterval(syncInterval);
+      window.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
   }, []);
 
-  const checkActiveSession = async () => {
+  const checkActiveSession = async (isBackgroundSync = false) => {
     const token = getSessionToken();
     if (!token) {
-      setIsLoadingSession(false);
+      if (!isBackgroundSync) setIsLoadingSession(false);
       return;
     }
 
@@ -58,10 +77,15 @@ export default function App() {
         clearSessionToken();
       }
     } catch (e) {
-      console.warn('Session verification error:', e);
-      clearSessionToken();
+      console.warn('Session verification notice:', e);
+      // Jangan hapus token jika hanya gangguan jaringan sementara atau offline
+      if (!isBackgroundSync && navigator.onLine) {
+        clearSessionToken();
+      }
     } finally {
-      setIsLoadingSession(false);
+      if (!isBackgroundSync) {
+        setIsLoadingSession(false);
+      }
     }
   };
 
@@ -145,8 +169,8 @@ export default function App() {
           {currentTab === 'presensi_manual' && <PresensiManual />}
           {currentTab === 'presensi_scan' && <PresensiBarcodeRFID />}
           {currentTab === 'izin_kamar_mandi' && <IzinKamarMandi />}
-          {currentTab === 'wali_kelas' && <WaliKelasView currentUser={currentUser} />}
-          {currentTab === 'kesiswaan' && <KesiswaanView />}
+          {currentTab === 'wali_kelas' && <WaliKelasView currentUser={currentUser} tenant={tenant} />}
+          {currentTab === 'kesiswaan' && <KesiswaanView tenant={tenant} currentUser={currentUser} />}
           {currentTab === 'master_data' && <MasterData />}
           {currentTab === 'database_settings' && (
             <DatabaseSettings tenant={tenant} onTenantUpdated={(updated) => setTenant(updated)} />

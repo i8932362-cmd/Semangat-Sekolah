@@ -1,6 +1,28 @@
 import React, { useState, useEffect } from 'react';
-import { X, ShieldCheck, Plus, CheckCircle, AlertCircle, RefreshCw, Key, Power, Trash2, Lock, Eye, EyeOff } from 'lucide-react';
+import {
+  X,
+  ShieldCheck,
+  Plus,
+  CheckCircle,
+  AlertCircle,
+  RefreshCw,
+  Key,
+  Power,
+  Trash2,
+  Lock,
+  Eye,
+  EyeOff,
+  Mail,
+  FolderPlus,
+  ExternalLink,
+  Edit,
+  Database,
+  Building,
+  Server,
+  Sparkles,
+} from 'lucide-react';
 import { api, setSuperToken, getSuperToken, clearSuperToken } from '../../services/api';
+import { googleSignIn, getAccessToken } from '../../services/googleAuth';
 
 interface SuperAdminModalProps {
   isOpen: boolean;
@@ -10,6 +32,7 @@ interface SuperAdminModalProps {
 
 export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClose, onSchoolAdded }) => {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [superEmail, setSuperEmail] = useState('presensiapp138@gmail.com');
   const [superPassword, setSuperPassword] = useState('');
   const [showSuperLoginPassword, setShowSuperLoginPassword] = useState(false);
   const [authError, setAuthError] = useState('');
@@ -21,10 +44,28 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
   const [showAddForm, setShowAddForm] = useState(false);
   const [name, setName] = useState('');
   const [code, setCode] = useState('');
+  const [schoolEmail, setSchoolEmail] = useState('');
   const [npsn, setNpsn] = useState('');
   const [password, setPassword] = useState('');
+  const [showSchoolPassword, setShowSchoolPassword] = useState(false);
   const [address, setAddress] = useState('');
+  const [phone, setPhone] = useState('');
+  const [driveFolderId, setDriveFolderId] = useState('');
+  const [spreadsheetId, setSpreadsheetId] = useState('');
   const [formMsg, setFormMsg] = useState({ text: '', isError: false });
+
+  // Form Edit Sekolah
+  const [editingTenant, setEditingTenant] = useState<any | null>(null);
+  const [editName, setEditName] = useState('');
+  const [editCode, setEditCode] = useState('');
+  const [editEmail, setEditEmail] = useState('');
+  const [editNpsn, setEditNpsn] = useState('');
+  const [editAddress, setEditAddress] = useState('');
+  const [editPhone, setEditPhone] = useState('');
+  const [editDriveFolderId, setEditDriveFolderId] = useState('');
+  const [editSpreadsheetId, setEditSpreadsheetId] = useState('');
+  const [editPassword, setEditPassword] = useState('');
+  const [editMsg, setEditMsg] = useState<{ text: string; isError: boolean } | null>(null);
 
   // Reset Password Sekolah State
   const [resetTenantId, setResetTenantId] = useState<string | null>(null);
@@ -35,11 +76,15 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
   const [currSuperPass, setCurrSuperPass] = useState('');
   const [newSuperPass, setNewSuperPass] = useState('');
   const [confirmNewSuperPass, setConfirmNewSuperPass] = useState('');
+  const [newSuperEmail, setNewSuperEmail] = useState('');
   const [changeSuperPassMsg, setChangeSuperPassMsg] = useState<{ text: string; isError: boolean } | null>(null);
   const [showSuperPassText, setShowSuperPassText] = useState(false);
 
   // Konfirmasi Hapus Sekolah
   const [deleteConfirmTenant, setDeleteConfirmTenant] = useState<any | null>(null);
+
+  // Loading state pembuatan database otomatis
+  const [creatingDbTenantId, setCreatingDbTenantId] = useState<string | null>(null);
 
   useEffect(() => {
     if (isOpen) {
@@ -58,18 +103,27 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
   const handleSuperLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError('');
+    if (!superEmail.trim()) {
+      setAuthError('Email Superadmin wajib diisi.');
+      return;
+    }
+    if (!superPassword.trim()) {
+      setAuthError('Kata sandi Superadmin wajib diisi.');
+      return;
+    }
+
     setIsLoading(true);
     try {
-      const res = await api.loginSuperadmin(superPassword);
+      const res = await api.loginSuperadmin(superPassword, superEmail.trim());
       if (res.success && res.token) {
         setSuperToken(res.token);
         setIsAuthenticated(true);
         await loadTenants(res.token);
       } else {
-        setAuthError(res.error || 'Sandi salah.');
+        setAuthError(res.error || 'Autentikasi gagal. Periksa kembali email dan sandi.');
       }
     } catch (e: any) {
-      setAuthError(e.message || 'Sandi Superadmin tidak valid.');
+      setAuthError(e.message || 'Sandi atau Email Superadmin tidak valid.');
     } finally {
       setIsLoading(false);
     }
@@ -86,7 +140,7 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
       console.warn('Error load tenants, resetting super session:', e);
       setIsAuthenticated(false);
       clearSuperToken();
-      setAuthError('Sesi Superadmin kedaluwarsa atau belum masuk. Silakan masukkan kata sandi kembali.');
+      setAuthError('Sesi Superadmin kedaluwarsa atau belum masuk. Silakan masukkan email & kata sandi kembali.');
     } finally {
       setIsLoading(false);
     }
@@ -102,20 +156,38 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
   const handleCreateSchool = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name || !code || !password) {
-      setFormMsg({ text: 'Nama, kode, dan sandi wajib diisi.', isError: true });
+      setFormMsg({ text: 'Nama sekolah, kode sekolah, dan sandi wajib diisi.', isError: true });
       return;
     }
     setIsLoading(true);
     try {
-      const res = await api.createTenant({ name, code, npsn, password, address });
+      const res = await api.createTenant({
+        name,
+        code,
+        email: schoolEmail,
+        npsn,
+        password,
+        address,
+        phone,
+        driveFolderId,
+        spreadsheetId,
+      });
       if (res.success) {
         setFormMsg({ text: 'Sekolah baru berhasil didaftarkan.', isError: false });
         setName('');
         setCode('');
+        setSchoolEmail('');
         setNpsn('');
         setPassword('');
         setAddress('');
+        setPhone('');
+        setDriveFolderId('');
+        setSpreadsheetId('');
         setShowAddForm(false);
+        setActionFeedback({
+          text: `Sekolah "${res.tenant?.name || name}" berhasil didaftarkan ke sistem multi-tenant.`,
+          isError: false,
+        });
         loadTenants();
         if (onSchoolAdded) onSchoolAdded();
       }
@@ -123,6 +195,97 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
       setFormMsg({ text: e.message || 'Gagal mendaftarkan sekolah.', isError: true });
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const handleStartEditTenant = (t: any) => {
+    setEditingTenant(t);
+    setEditName(t.name || '');
+    setEditCode(t.code || '');
+    setEditEmail(t.email || t.databaseEmail || '');
+    setEditNpsn(t.npsn || '');
+    setEditAddress(t.address || '');
+    setEditPhone(t.phone || '');
+    setEditDriveFolderId(t.driveFolderId || '');
+    setEditSpreadsheetId(t.spreadsheetId || '');
+    setEditPassword('');
+    setEditMsg(null);
+  };
+
+  const handleSaveEditTenant = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingTenant) return;
+    setIsLoading(true);
+    setEditMsg(null);
+    try {
+      const res = await api.updateTenant(editingTenant.id, {
+        name: editName,
+        code: editCode,
+        email: editEmail,
+        npsn: editNpsn,
+        address: editAddress,
+        phone: editPhone,
+        driveFolderId: editDriveFolderId,
+        spreadsheetId: editSpreadsheetId,
+        newPassword: editPassword.trim() ? editPassword.trim() : undefined,
+      });
+
+      if (res.success) {
+        setActionFeedback({
+          text: `Data sekolah "${editName}" berhasil diperbarui.`,
+          isError: false,
+        });
+        setEditingTenant(null);
+        await loadTenants();
+        if (onSchoolAdded) onSchoolAdded();
+      } else {
+        setEditMsg({ text: res.error || 'Gagal memperbarui sekolah.', isError: true });
+      }
+    } catch (err: any) {
+      setEditMsg({ text: err.message || 'Gagal memperbarui sekolah.', isError: true });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleAutoCreateDatabase = async (tenant: any) => {
+    setCreatingDbTenantId(tenant.id);
+    setActionFeedback(null);
+    try {
+      let token = await getAccessToken();
+      if (!token) {
+        // Tawarkan login Google OAuth jika belum ada token aktif
+        try {
+          const authRes = await googleSignIn();
+          if (authRes?.accessToken) {
+            token = authRes.accessToken;
+          }
+        } catch (oauthErr) {
+          console.warn('OAuth prompt dismissed, proceeding with managed database generation:', oauthErr);
+        }
+      }
+
+      const res = await api.autoCreateGoogleDatabase(tenant.id, token || '');
+      if (res.success) {
+        setActionFeedback({
+          text: `Database Google Drive & Sheet untuk "${tenant.name}" berhasil dibuat dan dihubungkan!`,
+          isError: false,
+        });
+        await loadTenants();
+        if (onSchoolAdded) onSchoolAdded();
+      } else {
+        setActionFeedback({
+          text: res.error || 'Gagal membuat database Google otomatis.',
+          isError: true,
+        });
+      }
+    } catch (err: any) {
+      setActionFeedback({
+        text: err.message || 'Gagal membuat database Google otomatis.',
+        isError: true,
+      });
+    } finally {
+      setCreatingDbTenantId(null);
     }
   };
 
@@ -175,13 +338,17 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
 
     setIsLoading(true);
     try {
-      const res = await api.changeSuperadminPassword(currSuperPass, newSuperPass);
+      const res = await api.changeSuperadminPassword(currSuperPass, newSuperPass, newSuperEmail.trim() || undefined);
       if (res.success) {
-        setChangeSuperPassMsg({ text: 'Sandi Superadmin berhasil diperbarui.', isError: false });
+        setChangeSuperPassMsg({ text: 'Akun & Sandi Superadmin berhasil diperbarui. Sandi lama tidak lagi berlaku.', isError: false });
         setCurrSuperPass('');
         setNewSuperPass('');
         setConfirmNewSuperPass('');
-        setTimeout(() => setShowChangeSuperPassword(false), 2000);
+        if (newSuperEmail.trim()) {
+          setSuperEmail(newSuperEmail.trim());
+          setNewSuperEmail('');
+        }
+        setTimeout(() => setShowChangeSuperPassword(false), 2500);
       } else {
         setChangeSuperPassMsg({ text: res.error || 'Gagal mengubah sandi superadmin.', isError: true });
       }
@@ -216,17 +383,24 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-xs">
-      <div className="bg-white border border-slate-200 rounded-2xl w-full max-w-3xl overflow-hidden shadow-2xl flex flex-col max-h-[90vh]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+      <div className="bg-white border border-slate-200 rounded-2xl w-full max-w-4xl overflow-hidden shadow-2xl flex flex-col max-h-[92vh]">
         {/* Modal Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 bg-slate-50">
           <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-xl bg-indigo-50 text-indigo-600 border border-indigo-200 flex items-center justify-center">
+            <div className="w-9 h-9 rounded-xl bg-indigo-600 text-white flex items-center justify-center shadow-xs">
               <ShieldCheck className="w-5 h-5" />
             </div>
             <div>
-              <h3 className="text-base font-bold text-slate-900">Superadmin Multi-Tenant</h3>
-              <p className="text-xs text-slate-600">Pendaftaran & Pengelolaan Sekolah Global</p>
+              <div className="flex items-center gap-2">
+                <h3 className="text-base font-bold text-slate-900">Panel Kontrol Superadmin</h3>
+                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-indigo-100 text-indigo-700">
+                  Multi-Tenant Real-Time
+                </span>
+              </div>
+              <p className="text-xs text-slate-500">
+                Pendaftaran & Pengelolaan Database Sekolah Terintegrasi Google Drive & Sheet
+              </p>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -236,12 +410,12 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
                 className="px-2.5 py-1 text-xs text-rose-700 hover:text-rose-800 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg flex items-center gap-1 transition font-medium cursor-pointer"
               >
                 <Power className="w-3.5 h-3.5" />
-                <span>Keluar Superadmin</span>
+                <span>Keluar</span>
               </button>
             )}
             <button
               onClick={onClose}
-              className="p-1.5 text-slate-500 hover:text-slate-900 rounded-lg hover:bg-slate-200 transition cursor-pointer"
+              className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-200 transition cursor-pointer"
             >
               <X className="w-5 h-5" />
             </button>
@@ -253,12 +427,17 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
           {!isAuthenticated ? (
             <div className="max-w-md mx-auto py-6">
               <div className="text-center mb-6">
-                <p className="text-sm font-medium text-slate-700">
-                  Masukkan sandi otoritas Superadmin untuk mengelola tenant sekolah.
+                <div className="inline-flex p-3 rounded-2xl bg-indigo-50 text-indigo-600 mb-3 border border-indigo-100">
+                  <Lock className="w-6 h-6" />
+                </div>
+                <h4 className="text-base font-bold text-slate-900">Masuk Otoritas Superadmin</h4>
+                <p className="text-xs text-slate-600 mt-1">
+                  Masukkan email terdaftar dan kata sandi untuk mengelola seluruh tenant sekolah.
                 </p>
-                <p className="text-xs text-slate-500 mt-1">
-                  Sandi awal: <code className="bg-slate-100 px-1.5 py-0.5 rounded text-indigo-700 font-mono font-bold border border-slate-200">superadmin123</code> <span className="text-[11px] text-slate-400">(tidak berlaku lagi jika sudah pernah diubah)</span>
-                </p>
+                <div className="mt-2.5 inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-slate-100 border border-slate-200 text-[11px] text-slate-600">
+                  <Mail className="w-3.5 h-3.5 text-indigo-600" />
+                  <span>Email terdaftar: <strong>presensiapp138@gmail.com</strong></span>
+                </div>
               </div>
 
               {authError && (
@@ -270,9 +449,26 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
 
               <form onSubmit={handleSuperLogin} className="space-y-4">
                 <div>
-                  <div className="flex items-center justify-between mb-2">
+                  <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">
+                    Email Terdaftar Superadmin
+                  </label>
+                  <div className="relative">
+                    <Mail className="w-4 h-4 absolute left-3.5 top-3 text-slate-400" />
+                    <input
+                      type="email"
+                      value={superEmail}
+                      onChange={(e) => setSuperEmail(e.target.value)}
+                      placeholder="presensiapp138@gmail.com"
+                      className="w-full pl-10 pr-3.5 py-2.5 bg-white border border-slate-300 rounded-xl text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-600 transition"
+                      required
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
                     <label className="block text-xs font-bold uppercase tracking-wider text-slate-700">
-                      Sandi Superadmin
+                      Kata Sandi Superadmin
                     </label>
                     <button
                       type="button"
@@ -282,43 +478,44 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
                       {showSuperLoginPassword ? (
                         <>
                           <EyeOff className="w-3.5 h-3.5" />
-                          <span>Sembunyikan Sandi</span>
+                          <span>Sembunyikan</span>
                         </>
                       ) : (
                         <>
                           <Eye className="w-3.5 h-3.5" />
-                          <span>Tampilkan Sandi</span>
+                          <span>Tampilkan</span>
                         </>
                       )}
                     </button>
                   </div>
                   <div className="relative">
+                    <Lock className="w-4 h-4 absolute left-3.5 top-3 text-slate-400" />
                     <input
                       type={showSuperLoginPassword ? 'text' : 'password'}
                       value={superPassword}
                       onChange={(e) => setSuperPassword(e.target.value)}
                       placeholder="Masukkan sandi superadmin..."
-                      className="w-full pl-3.5 pr-11 py-2.5 bg-white border border-slate-300 rounded-xl text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-600 transition"
+                      className="w-full pl-10 pr-11 py-2.5 bg-white border border-slate-300 rounded-xl text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-600 transition"
                       autoFocus
+                      required
                     />
                     <button
                       type="button"
                       onClick={() => setShowSuperLoginPassword(!showSuperLoginPassword)}
                       className="absolute inset-y-0 right-0 pr-3.5 flex items-center text-slate-400 hover:text-slate-700 cursor-pointer transition"
-                      aria-label={showSuperLoginPassword ? 'Sembunyikan sandi' : 'Tampilkan sandi'}
                     >
-                      {showSuperLoginPassword ? (
-                        <EyeOff className="w-4 h-4" />
-                      ) : (
-                        <Eye className="w-4 h-4" />
-                      )}
+                      {showSuperLoginPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                     </button>
                   </div>
+                  <p className="text-[11px] text-slate-500 mt-1.5">
+                    Sandi default awal: <code className="bg-slate-100 px-1.5 py-0.5 rounded text-indigo-700 font-mono font-bold">superadmin123</code> (tidak berlaku jika sudah diubah)
+                  </p>
                 </div>
+
                 <button
                   type="submit"
                   disabled={isLoading}
-                  className="w-full py-2.5 px-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-sm font-bold transition cursor-pointer shadow-xs"
+                  className="w-full py-2.5 px-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-sm font-bold transition cursor-pointer shadow-xs disabled:opacity-50"
                 >
                   {isLoading ? 'Memverifikasi...' : 'Masuk Panel Superadmin'}
                 </button>
@@ -329,8 +526,15 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
               {/* Header Action */}
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-200">
                 <div>
-                  <h4 className="text-sm font-bold text-slate-900">Daftar Sekolah Terdaftar ({tenants.length})</h4>
-                  <p className="text-xs text-slate-600">Kelola status aktif dan reset sandi tenant</p>
+                  <div className="flex items-center gap-2">
+                    <h4 className="text-sm font-bold text-slate-900">Database Sekolah Terdaftar ({tenants.length})</h4>
+                    <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
+                      Multi-Tenant Terisolasi
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Superadmin: <strong className="text-slate-800">{superEmail}</strong> • Peraturan tiap sekolah terisolasi dan tidak saling menimpa.
+                  </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                   <button
@@ -345,6 +549,7 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
                     onClick={() => {
                       setShowChangeSuperPassword(!showChangeSuperPassword);
                       setShowAddForm(false);
+                      setEditingTenant(null);
                     }}
                     className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition flex items-center gap-1.5 cursor-pointer ${
                       showChangeSuperPassword
@@ -353,12 +558,13 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
                     }`}
                   >
                     <Key className="w-3.5 h-3.5 text-indigo-600" />
-                    <span>Ubah Sandi Superadmin</span>
+                    <span>Ubah Sandi / Akun</span>
                   </button>
                   <button
                     onClick={() => {
                       setShowAddForm(!showAddForm);
                       setShowChangeSuperPassword(false);
+                      setEditingTenant(null);
                     }}
                     className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold rounded-lg transition flex items-center gap-1.5 cursor-pointer shadow-xs"
                   >
@@ -370,15 +576,22 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
 
               {/* Feedback Notifikasi Aksi */}
               {actionFeedback && (
-                <div className={`p-3 rounded-xl text-xs flex items-center justify-between gap-2 ${actionFeedback.isError ? 'bg-rose-50 text-rose-800 border border-rose-300 font-medium' : 'bg-emerald-50 text-emerald-800 border border-emerald-300 font-medium'}`}>
+                <div
+                  className={`p-3 rounded-xl text-xs flex items-center justify-between gap-2 ${
+                    actionFeedback.isError
+                      ? 'bg-rose-50 text-rose-800 border border-rose-300 font-medium'
+                      : 'bg-emerald-50 text-emerald-800 border border-emerald-300 font-medium'
+                  }`}
+                >
                   <div className="flex items-center gap-2">
-                    {actionFeedback.isError ? <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" /> : <CheckCircle className="w-4 h-4 shrink-0 text-emerald-600" />}
+                    {actionFeedback.isError ? (
+                      <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
+                    ) : (
+                      <CheckCircle className="w-4 h-4 shrink-0 text-emerald-600" />
+                    )}
                     <span>{actionFeedback.text}</span>
                   </div>
-                  <button
-                    onClick={() => setActionFeedback(null)}
-                    className="text-slate-500 hover:text-slate-800 p-0.5 cursor-pointer"
-                  >
+                  <button onClick={() => setActionFeedback(null)} className="text-slate-500 hover:text-slate-800 p-0.5 cursor-pointer">
                     <X className="w-3.5 h-3.5" />
                   </button>
                 </div>
@@ -390,24 +603,41 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
                   <div className="flex items-center justify-between mb-3">
                     <h5 className="text-sm font-bold text-slate-900 flex items-center gap-2">
                       <Key className="w-4 h-4 text-indigo-600" />
-                      Ubah Kata Sandi Superadmin
+                      Ubah Kata Sandi & Email Superadmin
                     </h5>
-                    <button
-                      onClick={() => setShowChangeSuperPassword(false)}
-                      className="text-slate-400 hover:text-slate-600 p-1 cursor-pointer"
-                    >
+                    <button onClick={() => setShowChangeSuperPassword(false)} className="text-slate-400 hover:text-slate-600 p-1 cursor-pointer">
                       <X className="w-4 h-4" />
                     </button>
                   </div>
 
                   {changeSuperPassMsg && (
-                    <div className={`mb-3 p-2.5 rounded-lg text-xs flex items-center gap-2 ${changeSuperPassMsg.isError ? 'bg-rose-50 text-rose-800 border border-rose-300 font-medium' : 'bg-emerald-50 text-emerald-800 border border-emerald-300 font-medium'}`}>
-                      {changeSuperPassMsg.isError ? <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" /> : <CheckCircle className="w-4 h-4 shrink-0 text-emerald-600" />}
+                    <div
+                      className={`mb-3 p-2.5 rounded-lg text-xs flex items-center gap-2 ${
+                        changeSuperPassMsg.isError
+                          ? 'bg-rose-50 text-rose-800 border border-rose-300 font-medium'
+                          : 'bg-emerald-50 text-emerald-800 border border-emerald-300 font-medium'
+                      }`}
+                    >
+                      {changeSuperPassMsg.isError ? (
+                        <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
+                      ) : (
+                        <CheckCircle className="w-4 h-4 shrink-0 text-emerald-600" />
+                      )}
                       <span>{changeSuperPassMsg.text}</span>
                     </div>
                   )}
 
-                  <form onSubmit={handleChangeSuperPassword} className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+                  <form onSubmit={handleChangeSuperPassword} className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                    <div>
+                      <label className="block text-slate-700 font-bold mb-1">Email Superadmin Baru (Opsional)</label>
+                      <input
+                        type="email"
+                        value={newSuperEmail}
+                        onChange={(e) => setNewSuperEmail(e.target.value)}
+                        placeholder={superEmail}
+                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-indigo-600"
+                      />
+                    </div>
                     <div>
                       <label className="block text-slate-700 font-bold mb-1">Sandi Superadmin Saat Ini *</label>
                       <input
@@ -441,7 +671,7 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
                         required
                       />
                     </div>
-                    <div className="sm:col-span-3 flex items-center justify-between pt-1">
+                    <div className="sm:col-span-2 flex items-center justify-between pt-1">
                       <label className="inline-flex items-center gap-1.5 text-slate-600 cursor-pointer">
                         <input
                           type="checkbox"
@@ -464,7 +694,7 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
                           disabled={isLoading}
                           className="px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-bold cursor-pointer shadow-xs disabled:opacity-50"
                         >
-                          {isLoading ? 'Menyimpan...' : 'Simpan Sandi Baru'}
+                          {isLoading ? 'Menyimpan...' : 'Simpan Pembaruan'}
                         </button>
                       </div>
                     </div>
@@ -475,13 +705,24 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
               {/* Form Tambah Sekolah Baru */}
               {showAddForm && (
                 <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 sm:p-5">
-                  <h5 className="text-sm font-bold text-slate-900 mb-3 flex items-center gap-2">
-                    <Plus className="w-4 h-4 text-indigo-600" />
-                    Formulir Registrasi Sekolah Baru
-                  </h5>
+                  <div className="flex items-center justify-between mb-3">
+                    <h5 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                      <Plus className="w-4 h-4 text-indigo-600" />
+                      Formulir Registrasi Sekolah Baru & Database Terhubung
+                    </h5>
+                    <button onClick={() => setShowAddForm(false)} className="text-slate-400 hover:text-slate-600 p-1 cursor-pointer">
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
 
                   {formMsg.text && (
-                    <div className={`mb-4 p-2.5 rounded-lg text-xs flex items-center gap-2 ${formMsg.isError ? 'bg-rose-50 text-rose-800 border border-rose-300 font-medium' : 'bg-emerald-50 text-emerald-800 border border-emerald-300 font-medium'}`}>
+                    <div
+                      className={`mb-4 p-2.5 rounded-lg text-xs flex items-center gap-2 ${
+                        formMsg.isError
+                          ? 'bg-rose-50 text-rose-800 border border-rose-300 font-medium'
+                          : 'bg-emerald-50 text-emerald-800 border border-emerald-300 font-medium'
+                      }`}
+                    >
                       {formMsg.isError ? <AlertCircle className="w-4 h-4 text-rose-600" /> : <CheckCircle className="w-4 h-4 text-emerald-600" />}
                       <span>{formMsg.text}</span>
                     </div>
@@ -506,12 +747,28 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
                         value={code}
                         onChange={(e) => setCode(e.target.value)}
                         placeholder="Contoh: SMPN3"
-                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-indigo-600 uppercase"
+                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-indigo-600 uppercase font-mono"
                         required
                       />
                     </div>
                     <div>
-                      <label className="block text-slate-700 font-bold mb-1">NPSN</label>
+                      <label className="block text-slate-700 font-bold mb-1">
+                        Email Resmi Sekolah / Admin (Database Google) *
+                      </label>
+                      <input
+                        type="email"
+                        value={schoolEmail}
+                        onChange={(e) => setSchoolEmail(e.target.value)}
+                        placeholder="Contoh: admin.smpn3@gmail.com"
+                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-indigo-600"
+                        required
+                      />
+                      <span className="text-[10px] text-slate-500 mt-0.5 block">
+                        Email ini digunakan untuk menghubungkan & membuat Google Drive / Google Sheets.
+                      </span>
+                    </div>
+                    <div>
+                      <label className="block text-slate-700 font-bold mb-1">NPSN Sekolah</label>
                       <input
                         type="text"
                         value={npsn}
@@ -521,14 +778,33 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
                       />
                     </div>
                     <div>
-                      <label className="block text-slate-700 font-bold mb-1">Sandi Sekolah Awal *</label>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="block text-slate-700 font-bold">Sandi Sekolah Awal *</label>
+                        <button
+                          type="button"
+                          onClick={() => setShowSchoolPassword(!showSchoolPassword)}
+                          className="text-[11px] text-indigo-600 hover:text-indigo-800 font-semibold cursor-pointer"
+                        >
+                          {showSchoolPassword ? 'Sembunyikan' : 'Tampilkan'}
+                        </button>
+                      </div>
                       <input
-                        type="password"
+                        type={showSchoolPassword ? 'text' : 'password'}
                         value={password}
                         onChange={(e) => setPassword(e.target.value)}
-                        placeholder="Sandi login sekolah..."
+                        placeholder="Sandi login portal sekolah..."
                         className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-indigo-600"
                         required
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-700 font-bold mb-1">No. Kontak / Telepon</label>
+                      <input
+                        type="text"
+                        value={phone}
+                        onChange={(e) => setPhone(e.target.value)}
+                        placeholder="021-1234567"
+                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-indigo-600"
                       />
                     </div>
                     <div className="sm:col-span-2">
@@ -537,10 +813,43 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
                         type="text"
                         value={address}
                         onChange={(e) => setAddress(e.target.value)}
-                        placeholder="Jl. Raya Pendidikan..."
+                        placeholder="Jl. Raya Pendidikan No. 12..."
                         className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-indigo-600"
                       />
                     </div>
+
+                    <div className="sm:col-span-2 p-3 bg-white border border-slate-200 rounded-xl space-y-2">
+                      <div className="flex items-center gap-2">
+                        <Database className="w-4 h-4 text-emerald-600" />
+                        <span className="font-bold text-slate-800">Konfigurasi Database Google (Opsional / Bisa Dibuat Otomatis)</span>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                        <div>
+                          <label className="block text-slate-600 mb-1">ID Google Drive Folder</label>
+                          <input
+                            type="text"
+                            value={driveFolderId}
+                            onChange={(e) => setDriveFolderId(e.target.value)}
+                            placeholder="Contoh: 1AbCdEfGhIjKlMnOpQrStUv..."
+                            className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-300 rounded-lg font-mono text-[11px]"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-slate-600 mb-1">ID Google Spreadsheet</label>
+                          <input
+                            type="text"
+                            value={spreadsheetId}
+                            onChange={(e) => setSpreadsheetId(e.target.value)}
+                            placeholder="Contoh: 1a2b3c4d5e6f7g8h9i0j-..."
+                            className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-300 rounded-lg font-mono text-[11px]"
+                          />
+                        </div>
+                      </div>
+                      <p className="text-[10px] text-slate-500">
+                        💡 Jika dikosongkan, Anda dapat mengklik tombol "Buat Database Otomatis" setelah sekolah didaftarkan.
+                      </p>
+                    </div>
+
                     <div className="sm:col-span-2 flex justify-end gap-2 pt-2">
                       <button
                         type="button"
@@ -552,9 +861,125 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
                       <button
                         type="submit"
                         disabled={isLoading}
-                        className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-bold cursor-pointer shadow-xs"
+                        className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-bold cursor-pointer shadow-xs disabled:opacity-50"
                       >
-                        {isLoading ? 'Menyimpan...' : 'Simpan Sekolah'}
+                        {isLoading ? 'Menyimpan...' : 'Daftarkan Sekolah'}
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              )}
+
+              {/* Modal Edit Detail Sekolah In-place */}
+              {editingTenant && (
+                <div className="bg-slate-50 border border-indigo-200 rounded-xl p-4 sm:p-5">
+                  <div className="flex items-center justify-between mb-3">
+                    <h5 className="text-sm font-bold text-indigo-950 flex items-center gap-2">
+                      <Edit className="w-4 h-4 text-indigo-600" />
+                      Edit Data Sekolah & Konfigurasi ({editingTenant.name})
+                    </h5>
+                    <button onClick={() => setEditingTenant(null)} className="text-slate-400 hover:text-slate-600 p-1 cursor-pointer">
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+
+                  {editMsg && (
+                    <div
+                      className={`mb-3 p-2.5 rounded-lg text-xs flex items-center gap-2 ${
+                        editMsg.isError
+                          ? 'bg-rose-50 text-rose-800 border border-rose-300 font-medium'
+                          : 'bg-emerald-50 text-emerald-800 border border-emerald-300 font-medium'
+                      }`}
+                    >
+                      {editMsg.isError ? <AlertCircle className="w-4 h-4 text-rose-600" /> : <CheckCircle className="w-4 h-4 text-emerald-600" />}
+                      <span>{editMsg.text}</span>
+                    </div>
+                  )}
+
+                  <form onSubmit={handleSaveEditTenant} className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                    <div>
+                      <label className="block text-slate-700 font-bold mb-1">Nama Sekolah</label>
+                      <input
+                        type="text"
+                        value={editName}
+                        onChange={(e) => setEditName(e.target.value)}
+                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-indigo-600"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-700 font-bold mb-1">Kode Sekolah</label>
+                      <input
+                        type="text"
+                        value={editCode}
+                        onChange={(e) => setEditCode(e.target.value)}
+                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-indigo-600 font-mono uppercase"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-700 font-bold mb-1">Email Resmi Sekolah / Database Google</label>
+                      <input
+                        type="email"
+                        value={editEmail}
+                        onChange={(e) => setEditEmail(e.target.value)}
+                        placeholder="admin.sekolah@gmail.com"
+                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-indigo-600"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-700 font-bold mb-1">NPSN</label>
+                      <input
+                        type="text"
+                        value={editNpsn}
+                        onChange={(e) => setEditNpsn(e.target.value)}
+                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-indigo-600"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-700 font-bold mb-1">Google Drive Folder ID</label>
+                      <input
+                        type="text"
+                        value={editDriveFolderId}
+                        onChange={(e) => setEditDriveFolderId(e.target.value)}
+                        placeholder="ID Folder Google Drive"
+                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-slate-900 font-mono text-[11px] focus:outline-none focus:ring-1 focus:ring-indigo-600"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-700 font-bold mb-1">Google Sheets ID</label>
+                      <input
+                        type="text"
+                        value={editSpreadsheetId}
+                        onChange={(e) => setEditSpreadsheetId(e.target.value)}
+                        placeholder="ID Spreadsheet Google Sheets"
+                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-slate-900 font-mono text-[11px] focus:outline-none focus:ring-1 focus:ring-indigo-600"
+                      />
+                    </div>
+                    <div className="sm:col-span-2">
+                      <label className="block text-slate-700 font-bold mb-1">Sandi Baru Sekolah (Kosongkan jika tidak diubah)</label>
+                      <input
+                        type="text"
+                        value={editPassword}
+                        onChange={(e) => setEditPassword(e.target.value)}
+                        placeholder="Masukkan sandi baru jika ingin mereset..."
+                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-indigo-600"
+                      />
+                    </div>
+                    <div className="sm:col-span-2 flex justify-end gap-2 pt-2">
+                      <button
+                        type="button"
+                        onClick={() => setEditingTenant(null)}
+                        className="px-3 py-2 rounded-lg bg-white border border-slate-300 text-slate-700 font-semibold cursor-pointer"
+                      >
+                        Batal
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={isLoading}
+                        className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-bold cursor-pointer shadow-xs disabled:opacity-50"
+                      >
+                        {isLoading ? 'Menyimpan...' : 'Simpan Perubahan'}
                       </button>
                     </div>
                   </form>
@@ -567,9 +992,9 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
                   <thead className="bg-slate-100 text-slate-700 font-bold uppercase tracking-wider border-b border-slate-200">
                     <tr>
                       <th className="py-2.5 px-3">Sekolah</th>
-                      <th className="py-2.5 px-3">Kode / NPSN</th>
+                      <th className="py-2.5 px-3">Kode & Email Database</th>
                       <th className="py-2.5 px-3">Status</th>
-                      <th className="py-2.5 px-3">Database G-Sheets</th>
+                      <th className="py-2.5 px-3">Database Drive & Sheets</th>
                       <th className="py-2.5 px-3 text-right">Aksi</th>
                     </tr>
                   </thead>
@@ -577,29 +1002,80 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
                     {tenants.map((t) => (
                       <tr key={t.id} className="hover:bg-slate-50 transition">
                         <td className="py-3 px-3 font-semibold text-slate-900">
-                          {t.name}
-                          <div className="text-[11px] text-slate-500 font-normal">{t.address || '-'}</div>
+                          <div className="flex items-center gap-1.5">
+                            <Building className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
+                            <span>{t.name}</span>
+                          </div>
+                          <div className="text-[11px] text-slate-500 font-normal pl-5">{t.address || '-'}</div>
                         </td>
                         <td className="py-3 px-3">
-                          <span className="font-mono bg-indigo-50 border border-indigo-200 px-1.5 py-0.5 rounded text-indigo-700 font-semibold">{t.code}</span>
-                          <span className="block text-[11px] text-slate-500 mt-0.5">NPSN: {t.npsn || '-'}</span>
+                          <span className="font-mono bg-indigo-50 border border-indigo-200 px-1.5 py-0.5 rounded text-indigo-700 font-semibold">
+                            {t.code}
+                          </span>
+                          <div className="flex items-center gap-1 text-[11px] text-slate-600 mt-1 font-sans">
+                            <Mail className="w-3 h-3 text-slate-400" />
+                            <span>{t.email || t.databaseEmail || 'Belum didaftarkan'}</span>
+                          </div>
+                          <span className="block text-[10px] text-slate-400">NPSN: {t.npsn || '-'}</span>
                         </td>
                         <td className="py-3 px-3">
-                          <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold border ${t.isActive ? 'bg-emerald-50 text-emerald-800 border-emerald-300' : 'bg-rose-50 text-rose-800 border-rose-300'}`}>
+                          <span
+                            className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                              t.isActive
+                                ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
+                                : 'bg-rose-50 text-rose-800 border-rose-300'
+                            }`}
+                          >
                             {t.isActive ? 'Aktif' : 'Nonaktif'}
                           </span>
                         </td>
                         <td className="py-3 px-3 text-[11px]">
                           {t.spreadsheetId ? (
-                            <span className="text-emerald-700 font-mono font-semibold">ID: {t.spreadsheetId.slice(0, 10)}...</span>
+                            <div className="space-y-1">
+                              <div className="flex items-center gap-1.5 text-emerald-700 font-semibold">
+                                <CheckCircle className="w-3.5 h-3.5 shrink-0" />
+                                <span className="font-mono text-[10px] truncate max-w-[140px]">{t.spreadsheetId}</span>
+                                <a
+                                  href={`https://docs.google.com/spreadsheets/d/${t.spreadsheetId}`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-indigo-600 hover:text-indigo-800 p-0.5 rounded"
+                                  title="Buka Google Sheets"
+                                >
+                                  <ExternalLink className="w-3 h-3" />
+                                </a>
+                              </div>
+                              {t.driveFolderId && (
+                                <div className="text-[10px] text-slate-500 font-mono truncate max-w-[140px]">
+                                  Folder: {t.driveFolderId}
+                                </div>
+                              )}
+                            </div>
                           ) : (
-                            <span className="text-amber-800 font-medium">Belum diatur</span>
+                            <button
+                              onClick={() => handleAutoCreateDatabase(t)}
+                              disabled={creatingDbTenantId === t.id}
+                              className="px-2.5 py-1 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 rounded-lg text-[11px] font-semibold flex items-center gap-1 cursor-pointer transition disabled:opacity-50"
+                              title="Buat folder Google Drive dan Google Sheet otomatis"
+                            >
+                              <FolderPlus className={`w-3.5 h-3.5 ${creatingDbTenantId === t.id ? 'animate-spin text-amber-700' : 'text-amber-700'}`} />
+                              <span>{creatingDbTenantId === t.id ? 'Membuat...' : 'Buat Database Otomatis'}</span>
+                            </button>
                           )}
                         </td>
-                        <td className="py-3 px-3 text-right space-x-1.5">
+                        <td className="py-3 px-3 text-right space-x-1">
+                          <button
+                            onClick={() => handleStartEditTenant(t)}
+                            className="p-1.5 rounded-lg border border-slate-300 text-slate-700 hover:text-slate-900 hover:bg-slate-100 transition cursor-pointer"
+                            title="Edit Data Sekolah & Konfigurasi"
+                          >
+                            <Edit className="w-3.5 h-3.5" />
+                          </button>
                           <button
                             onClick={() => handleToggleStatus(t.id, t.isActive)}
-                            className={`p-1.5 rounded-lg border transition cursor-pointer ${t.isActive ? 'border-amber-300 text-amber-800 hover:bg-amber-50' : 'border-emerald-300 text-emerald-800 hover:bg-emerald-50'}`}
+                            className={`p-1.5 rounded-lg border transition cursor-pointer ${
+                              t.isActive ? 'border-amber-300 text-amber-800 hover:bg-amber-50' : 'border-emerald-300 text-emerald-800 hover:bg-emerald-50'
+                            }`}
                             title={t.isActive ? 'Nonaktifkan Sekolah' : 'Aktifkan Sekolah'}
                           >
                             <Power className="w-3.5 h-3.5" />
@@ -633,7 +1109,7 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
                 <div className="p-4 rounded-xl bg-amber-50 border border-amber-300">
                   <h5 className="text-xs font-bold text-amber-900 mb-2 flex items-center gap-1.5">
                     <Key className="w-4 h-4 text-amber-700" />
-                    Reset Sandi Sekolah ({tenants.find(t => t.id === resetTenantId)?.name})
+                    Reset Sandi Sekolah ({tenants.find((t) => t.id === resetTenantId)?.name})
                   </h5>
                   <div className="flex gap-2">
                     <input
@@ -667,14 +1143,12 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
                       <Trash2 className="w-5 h-5" />
                     </div>
                     <div className="flex-1 text-xs">
-                      <h5 className="font-bold text-rose-900 text-sm mb-1">
-                        Konfirmasi Hapus Sekolah Permanen
-                      </h5>
+                      <h5 className="font-bold text-rose-900 text-sm mb-1">Konfirmasi Hapus Sekolah Permanen</h5>
                       <p className="text-rose-800 leading-relaxed">
                         Apakah Anda yakin ingin menghapus sekolah <strong className="font-bold text-slate-950 underline">"{deleteConfirmTenant.name}"</strong> (Kode: {deleteConfirmTenant.code})?
                       </p>
                       <p className="text-rose-700 font-semibold mt-1">
-                        ⚠️ Seluruh data siswa, kelas, rekapitulasi presensi, izin keluar, dan konfigurasi database sekolah ini akan dihapus secara permanen.
+                        ⚠️ Seluruh data siswa, kelas, rekapitulasi presensi, izin kamar mandi, dan konfigurasi database sekolah ini akan dihapus secara permanen dari server.
                       </p>
                       <div className="flex items-center gap-2 mt-3">
                         <button
@@ -702,4 +1176,3 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
     </div>
   );
 };
-

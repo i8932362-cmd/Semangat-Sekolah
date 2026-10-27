@@ -10,5 +10,13 @@
     "isSuperAdmin": true,
     "userRole": "superadmin",
     "createdAt": 1792817456521
+  },
+  {
+    "token": "super-3aafde42e74a6b064f082bca4ef97d3ee45b677977d170ba",
+    "tenantId": "global",
+    "isSuperAdmin": true,
+    "userRole": "superadmin",
+    "email": "presensiapp138@gmail.com",
+    "createdAt": 1793102882554
   }
 ]

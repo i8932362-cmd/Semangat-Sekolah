@@ -22,6 +22,7 @@ const SESSION_TOKEN_KEY = 'school_attendance_session_token';
 const SUPER_TOKEN_KEY = 'school_superadmin_session_token';
 
 interface LocalDBState {
+  superadminEmail?: string;
   superadminPassword: string;
   tenants: (TenantSchool & { password: string; rolePasswords?: Record<string, string> })[];
   tenantData: Record<
@@ -176,6 +177,7 @@ function initDefaultState(): LocalDBState {
   ];
 
   return {
+    superadminEmail: 'presensiapp138@gmail.com',
     superadminPassword: 'superadmin123',
     tenants: [
       {
@@ -183,6 +185,8 @@ function initDefaultState(): LocalDBState {
         name: 'SMP Negeri 1 Nusantara',
         code: 'SMPN1',
         npsn: '20104051',
+        email: 'admin.smpn1@sekolah.sch.id',
+        databaseEmail: 'presensiapp138@gmail.com',
         address: 'Jl. Merdeka No. 45, Jakarta Pusat',
         phone: '021-3456789',
         password: 'sekolah123',
@@ -377,11 +381,21 @@ export async function handleLocalFallbackRequest(
     };
   }
 
-  // 3. POST /api/auth/superadmin-login
+  // 3. POST /api/auth/superadmin-login (Superadmin Login dengan Email & Password Terdaftar)
   if (pathOnly === '/api/auth/superadmin-login' && method === 'POST') {
-    const { superPassword } = body;
+    const { superPassword, superEmail, email, password } = body;
+    const inputEmail = (superEmail || email || '').trim().toLowerCase();
+    const inputPass = (superPassword || password || '').trim();
+    const registeredEmail = (db.superadminEmail || 'presensiapp138@gmail.com').trim().toLowerCase();
     const currentPass = (db.superadminPassword || 'superadmin123').trim();
-    if ((superPassword || '').trim() !== currentPass) {
+
+    if (!inputEmail) {
+      throw new Error('Email Superadmin wajib diisi.');
+    }
+    if (inputEmail !== registeredEmail) {
+      throw new Error(`Email Superadmin tidak terdaftar. Gunakan: ${registeredEmail}`);
+    }
+    if (inputPass !== currentPass) {
       throw new Error('Sandi Superadmin tidak valid.');
     }
     const superToken = `super-local-${Date.now()}`;
@@ -395,21 +409,25 @@ export async function handleLocalFallbackRequest(
       success: true,
       token: superToken,
       isSuperAdmin: true,
+      email: registeredEmail,
     };
   }
 
   // 3.B POST /api/superadmin/change-password
   if (pathOnly === '/api/superadmin/change-password' && method === 'POST') {
-    const { currentPassword, newPassword } = body;
+    const { currentPassword, newPassword, newEmail } = body;
     const currentPass = (db.superadminPassword || 'superadmin123').trim();
     if ((currentPassword || '').trim() !== currentPass) {
       throw new Error('Sandi Superadmin saat ini salah.');
     }
     db.superadminPassword = newPassword.trim();
+    if (newEmail && typeof newEmail === 'string' && newEmail.includes('@')) {
+      db.superadminEmail = newEmail.trim().toLowerCase();
+    }
     saveLocalDB(db);
     return {
       success: true,
-      message: 'Sandi Superadmin berhasil diperbarui. Sandi default lama tidak lagi berlaku.',
+      message: 'Sandi & Akun Superadmin berhasil diperbarui. Sandi default lama tidak lagi berlaku.',
     };
   }
 
@@ -659,13 +677,27 @@ export async function handleLocalFallbackRequest(
   if (pathOnly === '/api/presensi') {
     const tData = db.tenantData[activeTenantId] || db.tenantData['sch-smpn1'];
     if (method === 'GET') {
-      const date = queryParams.get('date') || getTodayJakarta();
+      const date = queryParams.get('date');
+      const startDate = queryParams.get('startDate');
+      const endDate = queryParams.get('endDate');
       const classId = queryParams.get('classId');
+      const studentId = queryParams.get('studentId');
       const sessionId = queryParams.get('sessionId');
-      let list = (tData.presensi || []).filter((p) => p.date === date);
-      if (classId) list = list.filter((p) => p.classId === classId);
-      if (sessionId) list = list.filter((p) => p.sessionId === sessionId);
-      return { success: true, presensi: list };
+
+      let list = tData.presensi || [];
+      if (startDate && endDate) {
+        list = list.filter((p: any) => p.date >= startDate && p.date <= endDate);
+      } else if (date) {
+        list = list.filter((p: any) => p.date === date);
+      } else {
+        const today = getTodayJakarta();
+        list = list.filter((p: any) => p.date === today);
+      }
+
+      if (classId && classId !== 'all') list = list.filter((p: any) => p.classId === classId);
+      if (studentId && studentId !== 'all') list = list.filter((p: any) => p.studentId === studentId);
+      if (sessionId && sessionId !== 'all') list = list.filter((p: any) => p.sessionId === sessionId);
+      return { success: true, presensi: list, records: list };
     }
 
     if (method === 'POST') {
@@ -1017,21 +1049,23 @@ export async function handleLocalFallbackRequest(
       return { success: true, tenants: db.tenants };
     }
     if (method === 'POST') {
-      const { name, code, npsn, password, address, phone } = body;
+      const { name, code, email, npsn, password, address, phone, driveFolderId, spreadsheetId } = body;
       const newId = `sch-${code.toLowerCase().replace(/[^a-z0-9]/g, '') || Date.now()}`;
       const newTenant: any = {
         id: newId,
         name,
         code: code.toUpperCase(),
         npsn: npsn || '',
+        email: email || '',
+        databaseEmail: email || 'presensiapp138@gmail.com',
         address: address || '',
         phone: phone || '',
         password: password || 'sekolah123',
         isActive: true,
-        driveFolderId: '',
-        spreadsheetId: '',
+        driveFolderId: driveFolderId || '',
+        spreadsheetId: spreadsheetId || '',
         lastSyncTime: '',
-        syncStatus: 'disconnected',
+        syncStatus: (driveFolderId && spreadsheetId) ? 'connected' : 'disconnected',
         createdAt: getNowJakarta(),
       };
       db.tenants.push(newTenant);
@@ -1056,12 +1090,122 @@ export async function handleLocalFallbackRequest(
         presensi: [],
         bathroomPermits: [],
         auditLogs: [],
-        users: [],
+        users: [
+          {
+            id: `usr-admin-${newId}`,
+            tenantId: newId,
+            username: 'admin',
+            fullName: `Admin ${name}`,
+            role: 'admin',
+            email: email || 'admin@sekolah.id',
+            isActive: true,
+            createdAt: getNowJakarta(),
+          },
+        ],
         backups: [],
-        driveConfig: { driveFolderId: '', spreadsheetId: '', syncStatus: 'disconnected', lastSyncTime: '' },
+        driveConfig: {
+          driveFolderId: driveFolderId || '',
+          spreadsheetId: spreadsheetId || '',
+          syncStatus: (driveFolderId && spreadsheetId) ? 'connected' : 'disconnected',
+          lastSyncTime: '',
+        },
       };
       saveLocalDB(db);
-      return { success: true, message: `Sekolah ${name} berhasil ditambahkan.`, tenant: newTenant };
+      return { success: true, message: `Sekolah ${name} berhasil didaftarkan.`, tenant: newTenant };
+    }
+  }
+
+  // UPDATE DATA SEKOLAH (SUPERADMIN)
+  if (pathOnly.startsWith('/api/superadmin/tenants/') && method === 'PUT') {
+    const id = pathOnly.split('/')[4];
+    const target = db.tenants.find((t) => t.id === id);
+    if (!target) throw new Error('Sekolah tidak ditemukan.');
+
+    const { name, code, email, npsn, address, phone, driveFolderId, spreadsheetId, newPassword, isActive } = body;
+    if (name) target.name = name.trim();
+    if (code) target.code = code.trim().toUpperCase();
+    if (email !== undefined) target.email = email.trim();
+    if (npsn !== undefined) target.npsn = npsn.trim();
+    if (address !== undefined) target.address = address.trim();
+    if (phone !== undefined) target.phone = phone.trim();
+    if (driveFolderId !== undefined) target.driveFolderId = driveFolderId.trim();
+    if (spreadsheetId !== undefined) {
+      target.spreadsheetId = spreadsheetId.trim();
+      target.syncStatus = target.spreadsheetId ? 'connected' : 'disconnected';
+    }
+    if (newPassword) target.password = newPassword.trim();
+    if (typeof isActive === 'boolean') target.isActive = isActive;
+
+    saveLocalDB(db);
+    return { success: true, message: `Data sekolah ${target.name} berhasil diperbarui.`, tenant: target };
+  }
+
+  // STATUS & RESET PASSWORD SEKOLAH
+  if (pathOnly.startsWith('/api/superadmin/tenants/') && pathOnly.endsWith('/status') && method === 'PATCH') {
+    const parts = pathOnly.split('/');
+    const id = parts[4];
+    const target = db.tenants.find((t) => t.id === id);
+    if (!target) throw new Error('Sekolah tidak ditemukan.');
+
+    const { isActive, newPassword } = body;
+    if (typeof isActive === 'boolean') target.isActive = isActive;
+    if (newPassword) target.password = newPassword.trim();
+
+    saveLocalDB(db);
+    return { success: true, message: 'Status sekolah berhasil diperbarui.' };
+  }
+
+  // AUTO CREATE GOOGLE DATABASE UNTUK SEKOLAH TERTENTU
+  if (pathOnly.startsWith('/api/superadmin/tenants/') && pathOnly.endsWith('/auto-create-database') && method === 'POST') {
+    const parts = pathOnly.split('/');
+    const id = parts[4];
+    const target = db.tenants.find((t) => t.id === id);
+    if (!target) throw new Error('Sekolah tidak ditemukan.');
+
+    const mockFolderId = `1Drive_${id}_${Date.now()}`;
+    const mockSheetId = `1Sheet_${id}_${Date.now()}`;
+
+    target.driveFolderId = mockFolderId;
+    target.spreadsheetId = mockSheetId;
+    target.syncStatus = 'connected';
+    target.lastSyncTime = getNowJakarta();
+
+    saveLocalDB(db);
+    return {
+      success: true,
+      message: `Database Google Drive & Sheet untuk sekolah ${target.name} berhasil dibuat dan dihubungkan.`,
+      tenant: target,
+      driveFolderId: mockFolderId,
+      spreadsheetId: mockSheetId,
+    };
+  }
+
+  // PERATURAN SEKOLAH (TERISOLASI PER TENANT)
+  if (pathOnly === '/api/admin/rules') {
+    const tData: any = db.tenantData[activeTenantId] || db.tenantData['sch-smpn1'];
+    if (method === 'GET') {
+      return {
+        success: true,
+        rules: tData.rules || {
+          toleransiKeterlambatanMenit: 15,
+          jamMasukMaksimal: '07:00',
+          jamPulang: '14:30',
+          izinKamarMandiMaksimalMenit: 10,
+          maksimalIzinPerHari: 2,
+          maksimalIzinSerentakPerKelas: 2,
+          sanksiKeterlambatan: 'Teguran lisan untuk 1-3 kali terlambat, pemanggilan orang tua untuk >3 kali terlambat.',
+          catatanPeraturan: 'Semua siswa wajib melakukan presensi kartu/barcode sebelum jam 07:00 WIB.',
+          updatedAt: getNowJakarta(),
+        },
+      };
+    }
+    if (method === 'POST') {
+      tData.rules = {
+        ...body,
+        updatedAt: getNowJakarta(),
+      };
+      saveLocalDB(db);
+      return { success: true, message: 'Peraturan sekolah berhasil disimpan secara persisten.', rules: tData.rules };
     }
   }
 
