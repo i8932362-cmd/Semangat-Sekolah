@@ -35,12 +35,12 @@ export default function App() {
   useEffect(() => {
     checkActiveSession();
 
-    // Multi-device real-time sync: sinkronisasi berkala dan saat tab difokuskan
+    // Multi-device real-time sync: sinkronisasi berkala (tiap 10-15 detik) dan saat tab difokuskan
     const syncInterval = setInterval(() => {
       if (document.visibilityState === 'visible' && getSessionToken()) {
         checkActiveSession(true);
       }
-    }, 20000);
+    }, 12000);
 
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible' && getSessionToken()) {
@@ -48,10 +48,19 @@ export default function App() {
       }
     };
 
+    const handleOnline = () => {
+      if (getSessionToken()) {
+        checkActiveSession(true);
+      }
+    };
+
     window.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('online', handleOnline);
+
     return () => {
       clearInterval(syncInterval);
       window.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('online', handleOnline);
     };
   }, []);
 
@@ -75,12 +84,33 @@ export default function App() {
         }
       } else {
         clearSessionToken();
+        setTenant(null);
+        setCurrentUser(null);
       }
-    } catch (e) {
+    } catch (e: any) {
+      const errMsg = e.message || '';
+      // Jika sekolah dinonaktifkan atau dihapus oleh Superadmin, akhiri sesi otomatis seketika
+      if (
+        e.status === 403 ||
+        e.status === 401 ||
+        errMsg.toLowerCase().includes('dinonaktifkan') ||
+        errMsg.toLowerCase().includes('dihapus') ||
+        errMsg.toLowerCase().includes('tidak terdaftar')
+      ) {
+        clearSessionToken();
+        setTenant(null);
+        setCurrentUser(null);
+        if (errMsg) {
+          alert(`Sesi berakhir: ${errMsg}`);
+        }
+        return;
+      }
+
       console.warn('Session verification notice:', e);
-      // Jangan hapus token jika hanya gangguan jaringan sementara atau offline
       if (!isBackgroundSync && navigator.onLine) {
         clearSessionToken();
+        setTenant(null);
+        setCurrentUser(null);
       }
     } finally {
       if (!isBackgroundSync) {

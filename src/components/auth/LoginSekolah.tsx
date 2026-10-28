@@ -18,6 +18,7 @@ import {
   ArrowLeft,
   KeyRound,
   Check,
+  RefreshCw,
 } from 'lucide-react';
 import { api, setSessionToken, clearSessionToken } from '../../services/api';
 import { TenantSchool } from '../../types';
@@ -43,6 +44,7 @@ export const LoginSekolah: React.FC<LoginSekolahProps> = ({ onLoginSuccess, onOp
   const [schoolPassword, setSchoolPassword] = useState('');
   const [showSchoolPassword, setShowSchoolPassword] = useState(false);
   const [showDropdown, setShowDropdown] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
 
   // Step 2: Role Selection States
   const [selectedRole, setSelectedRole] = useState<ActiveRoleTab>('petugas');
@@ -67,16 +69,47 @@ export const LoginSekolah: React.FC<LoginSekolahProps> = ({ onLoginSuccess, onOp
 
   useEffect(() => {
     loadSchools();
+
+    // SINKRONISASI CEPAT ANTARPERANGKAT: Polling otomatis tiap 7 detik
+    const pollInterval = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        loadSchools(true);
+      }
+    }, 7000);
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        loadSchools(true);
+      }
+    };
+
+    const handleOnline = () => {
+      loadSchools(true);
+    };
+
+    window.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('online', handleOnline);
+
+    return () => {
+      clearInterval(pollInterval);
+      window.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('online', handleOnline);
+    };
   }, []);
 
-  const loadSchools = async () => {
+  const loadSchools = async (isSilent: boolean = false) => {
+    if (!isSilent) setIsRefreshing(true);
     try {
       const res = await api.getSchools();
-      if (res.success) {
-        setSchools(res.schools || []);
+      if (res && res.success && Array.isArray(res.schools)) {
+        setSchools(res.schools);
       }
     } catch (e: any) {
-      console.error('Gagal memuat daftar sekolah:', e);
+      if (!isSilent) {
+        console.error('Gagal memuat daftar sekolah dari server:', e);
+      }
+    } finally {
+      if (!isSilent) setIsRefreshing(false);
     }
   };
 
@@ -239,8 +272,18 @@ export const LoginSekolah: React.FC<LoginSekolahProps> = ({ onLoginSuccess, onOp
     <div className="min-h-screen bg-slate-100 flex flex-col justify-center items-center p-4 sm:p-6 text-slate-800">
       <div className="w-full max-w-2xl relative z-10">
         {/* Top utility row */}
-        <div className="flex items-center justify-end mb-4">
-          <PWAInstallButton />
+        <div className="flex items-center justify-between mb-4">
+          <button
+            type="button"
+            onClick={onOpenSuperAdmin}
+            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-xl text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 shadow-xs transition cursor-pointer"
+          >
+            <ShieldCheck className="w-4 h-4 text-indigo-600" />
+            <span>Superadmin</span>
+          </button>
+          <div className="flex items-center gap-2">
+            <PWAInstallButton />
+          </div>
         </div>
 
         {/* Header Branding */}
@@ -281,9 +324,21 @@ export const LoginSekolah: React.FC<LoginSekolahProps> = ({ onLoginSuccess, onOp
             <form onSubmit={handleSchoolSubmit} className="space-y-5">
               {/* Input Nama Sekolah */}
               <div className="relative">
-                <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-2">
-                  Pilih atau Ketik Nama Sekolah
-                </label>
+                <div className="flex items-center justify-between mb-2">
+                  <label className="block text-xs font-bold uppercase tracking-wider text-slate-700">
+                    Pilih atau Ketik Nama Sekolah
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => loadSchools(false)}
+                    disabled={isRefreshing}
+                    title="Muat ulang daftar sekolah dari server"
+                    className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-600 hover:text-indigo-800 transition cursor-pointer disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-3 h-3 ${isRefreshing ? 'animate-spin' : ''}`} />
+                    <span>Muat ulang</span>
+                  </button>
+                </div>
                 <div className="relative">
                   <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-500">
                     <School className="w-4 h-4" />

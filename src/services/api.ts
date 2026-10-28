@@ -32,18 +32,24 @@ export const clearSuperToken = () => {
 
 async function request(endpoint: string, options: RequestInit = {}) {
   const token = getSessionToken();
+  const superToken = getSuperToken();
   const headers = new Headers(options.headers || {});
 
   if (!headers.has('Content-Type') && !(options.body instanceof FormData)) {
     headers.set('Content-Type', 'application/json');
   }
 
-  if (token && !headers.has('Authorization')) {
+  if (endpoint.startsWith('/api/superadmin/')) {
+    if (superToken && !headers.has('Authorization')) {
+      headers.set('Authorization', `Bearer ${superToken}`);
+    }
+  } else if (token && !headers.has('Authorization')) {
     headers.set('Authorization', `Bearer ${token}`);
   }
 
   try {
     const response = await fetch(endpoint, {
+      credentials: 'include',
       ...options,
       headers,
     });
@@ -463,7 +469,7 @@ export const api = {
       body: JSON.stringify({ accessToken }),
     });
   },
-  deleteTenant: (tenantId: string) => {
+  deleteTenant: (tenantId: string, accessToken?: string) => {
     const superToken = getSuperToken();
     const headers: Record<string, string> = {};
     if (superToken && typeof superToken === 'string') {
@@ -472,6 +478,7 @@ export const api = {
     return request(`/api/superadmin/tenants/${tenantId}`, {
       method: 'DELETE',
       headers,
+      body: JSON.stringify({ accessToken }),
     });
   },
   changeSuperadminPassword: (currentPassword: string, newPassword: string, newEmail?: string, newUsername?: string) => {
@@ -486,4 +493,78 @@ export const api = {
       body: JSON.stringify({ currentPassword, newPassword, newEmail, newUsername }),
     });
   },
+  logoutSuperadmin: () => {
+    clearSuperToken();
+    return request('/api/auth/superadmin-logout', { method: 'POST' });
+  },
+  getSystemVersion: () => request('/api/system/version'),
+  getSuperadminConfig: () => {
+    const superToken = getSuperToken();
+    const headers: Record<string, string> = {};
+    if (superToken) headers['Authorization'] = `Bearer ${superToken}`;
+    return request('/api/superadmin/config', { headers });
+  },
+  saveSuperadminConfig: (payload: { masterSpreadsheetId?: string; masterDriveFolderId?: string }) => {
+    const superToken = getSuperToken();
+    const headers: Record<string, string> = {};
+    if (superToken) headers['Authorization'] = `Bearer ${superToken}`;
+    return request('/api/superadmin/config', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload),
+    });
+  },
+  // Otomatisasi Sesi Presensi Real-Time
+  getCurrentSession: () => request('/api/presensi/current-session'),
+
+  // Peringkat Kedisiplinan & Keterlambatan Siswa
+  getDisciplineRankings: (params: {
+    timeframe?: string;
+    date?: string;
+    startDate?: string;
+    endDate?: string;
+    classId?: string;
+    searchQuery?: string;
+    minRecords?: number;
+  } = {}) => {
+    const searchParams = new URLSearchParams();
+    if (params.timeframe) searchParams.append('timeframe', params.timeframe);
+    if (params.date) searchParams.append('date', params.date);
+    if (params.startDate) searchParams.append('startDate', params.startDate);
+    if (params.endDate) searchParams.append('endDate', params.endDate);
+    if (params.classId) searchParams.append('classId', params.classId);
+    if (params.searchQuery) searchParams.append('searchQuery', params.searchQuery);
+    if (params.minRecords !== undefined) searchParams.append('minRecords', String(params.minRecords));
+    return request(`/api/discipline/rankings?${searchParams.toString()}`);
+  },
+
+  // Pengaturan Aturan & Bobot Kedisiplinan Admin Sekolah
+  getDisciplineSettings: () => request('/api/admin/discipline-settings'),
+  saveDisciplineSettings: (payload: {
+    bobotHadirTepatWaktu?: number;
+    bobotTerlambat?: number;
+    bobotSakit?: number;
+    bobotIzin?: number;
+    bobotAlpha?: number;
+    penaltiToiletOverdue?: number;
+    minimumPresensiHari?: number;
+  }) =>
+    request('/api/admin/discipline-settings', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  // Otomasi Pembuatan Database Master Superadmin (Drive Folder & Google Sheet)
+  autoCreateMasterDatabase: (accessToken?: string) => {
+    const superToken = getSuperToken();
+    const headers: Record<string, string> = {};
+    if (superToken) headers['Authorization'] = `Bearer ${superToken}`;
+    return request('/api/superadmin/auto-create-master-database', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ accessToken }),
+    });
+  },
+
+  verifySchoolSession: () => request('/api/auth/verify-session'),
 };

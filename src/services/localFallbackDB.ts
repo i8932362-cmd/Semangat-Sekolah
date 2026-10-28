@@ -24,6 +24,10 @@ const SUPER_TOKEN_KEY = 'school_superadmin_session_token';
 interface LocalDBState {
   superadminEmail?: string;
   superadminPassword: string;
+  configVersion?: number;
+  masterSpreadsheetId?: string;
+  masterDriveFolderId?: string;
+  changeHistory?: any[];
   tenants: (TenantSchool & { password: string; rolePasswords?: Record<string, string> })[];
   tenantData: Record<
     string,
@@ -40,7 +44,7 @@ interface LocalDBState {
       driveConfig: { driveFolderId: string; spreadsheetId: string; syncStatus: string; lastSyncTime: string };
     }
   >;
-  sessions: Record<string, { token: string; tenantId: string; user?: any; isSuperAdmin?: boolean }>;
+  sessions: Record<string, { token: string; tenantId: string; user?: any; isSuperAdmin?: boolean; role?: string }>;
 }
 
 function getTodayJakarta(): string {
@@ -381,36 +385,89 @@ export async function handleLocalFallbackRequest(
     };
   }
 
-  // 3. POST /api/auth/superadmin-login (Superadmin Login dengan Email & Password Terdaftar)
+  // 3. POST /api/auth/superadmin-login (Superadmin Login dengan Email & Password)
   if (pathOnly === '/api/auth/superadmin-login' && method === 'POST') {
-    const { superPassword, superEmail, email, password } = body;
-    const inputEmail = (superEmail || email || '').trim().toLowerCase();
-    const inputPass = (superPassword || password || '').trim();
+    const { superPassword, superEmail, email, password, identifier } = body;
+    const inputEmail = (email || superEmail || identifier || '').trim().toLowerCase();
+    const inputPass = (password || superPassword || '').trim();
     const registeredEmail = (db.superadminEmail || 'presensiapp138@gmail.com').trim().toLowerCase();
     const currentPass = (db.superadminPassword || 'superadmin123').trim();
 
-    if (!inputEmail) {
-      throw new Error('Email Superadmin wajib diisi.');
-    }
-    if (inputEmail !== registeredEmail) {
-      throw new Error(`Email Superadmin tidak terdaftar. Gunakan: ${registeredEmail}`);
-    }
-    if (inputPass !== currentPass) {
-      throw new Error('Sandi Superadmin tidak valid.');
+    if (!inputEmail || !inputPass || inputEmail !== registeredEmail || inputPass !== currentPass) {
+      throw new Error('Email atau sandi salah');
     }
     const superToken = `super-local-${Date.now()}`;
     db.sessions[superToken] = {
       token: superToken,
       tenantId: 'global',
       isSuperAdmin: true,
+      role: 'superadmin',
     };
     saveLocalDB(db);
     return {
       success: true,
       token: superToken,
+      role: 'superadmin',
       isSuperAdmin: true,
       email: registeredEmail,
+      message: 'Login Superadmin berhasil.',
     };
+  }
+
+  // POST /api/auth/superadmin-logout
+  if (pathOnly === '/api/auth/superadmin-logout' && method === 'POST') {
+    return { success: true, message: 'Berhasil keluar.' };
+  }
+
+  // GET /api/system/version
+  if (pathOnly === '/api/system/version' && method === 'GET') {
+    return {
+      success: true,
+      version: db.configVersion || 1,
+      lastSyncTime: new Date().toISOString(),
+      totalTenants: db.tenants.length,
+      activeTenants: db.tenants.filter((t: any) => t.isActive).length,
+    };
+  }
+
+  // GET /api/superadmin/config
+  if (pathOnly === '/api/superadmin/config' && method === 'GET') {
+    return {
+      success: true,
+      config: {
+        configVersion: db.configVersion || 1,
+        lastSyncTime: new Date().toISOString(),
+        masterSpreadsheetId: db.masterSpreadsheetId || '',
+        masterDriveFolderId: db.masterDriveFolderId || '',
+        googleDriveConnected: Boolean(db.masterDriveFolderId),
+        googleSheetsConnected: Boolean(db.masterSpreadsheetId),
+        changeHistory: db.changeHistory || [],
+        totalTenants: db.tenants.length,
+        activeTenants: db.tenants.filter((t: any) => t.isActive).length,
+      },
+    };
+  }
+
+  // POST /api/superadmin/config
+  if (pathOnly === '/api/superadmin/config' && method === 'POST') {
+    const { masterSpreadsheetId, masterDriveFolderId } = body;
+    db.masterSpreadsheetId = masterSpreadsheetId || '';
+    db.masterDriveFolderId = masterDriveFolderId || '';
+    db.configVersion = (db.configVersion || 1) + 1;
+    saveLocalDB(db);
+    return { success: true, message: 'Konfigurasi master berhasil disimpan.', config: db };
+  }
+
+  // POST /api/superadmin/sync-master-sheet
+  if (pathOnly === '/api/superadmin/sync-master-sheet' && method === 'POST') {
+    db.configVersion = (db.configVersion || 1) + 1;
+    saveLocalDB(db);
+    return { success: true, message: `Data master ${db.tenants.length} sekolah berhasil disinkronkan.` };
+  }
+
+  // GET /api/auth/verify-session
+  if (pathOnly === '/api/auth/verify-session' && method === 'GET') {
+    return { success: true, tenant: db.tenants[0], userRole: 'admin' };
   }
 
   // 3.B POST /api/superadmin/change-password
@@ -670,6 +727,104 @@ export async function handleLocalFallbackRequest(
       schedules: tData.schedules || [],
       programs: tData.programs || [],
       activeBathroomPermits: (tData.bathroomPermits || []).filter((p) => !p.isReturned),
+    };
+  }
+
+  // 8.B GET /api/presensi/current-session
+  if (pathOnly === '/api/presensi/current-session') {
+    const tData = db.tenantData[activeTenantId] || db.tenantData['sch-smpn1'];
+    const schedules = tData.schedules || [];
+    const now = new Date();
+    const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    const active = schedules.find((s) => s.isActive && timeStr >= s.entryStartTime && timeStr <= (s.exitTime || s.entryLimitTime || '14:00')) || schedules[0] || null;
+    return {
+      success: true,
+      activeSession: active,
+      nextSession: schedules[1] || null,
+      serverTime: timeStr,
+      serverDate: getTodayJakarta(),
+      dayName: 'Hari Ini',
+      status: active ? 'active' : 'outside_schedule',
+      message: active ? `Sesi ${active.sessionName} aktif` : 'Di Luar Jadwal Presensi',
+    };
+  }
+
+  // 8.C GET /api/discipline/rankings
+  if (pathOnly === '/api/discipline/rankings') {
+    const tData = db.tenantData[activeTenantId] || db.tenantData['sch-smpn1'];
+    const students = tData.students || [];
+    const presensi = tData.presensi || [];
+    const rankings = students.map((std, idx) => {
+      const pList = presensi.filter((p) => p.studentId === std.id);
+      const hadir = pList.filter((p) => p.status === 'hadir').length;
+      const terlambat = pList.filter((p) => p.status === 'terlambat').length;
+      const sakit = pList.filter((p) => p.status === 'sakit').length;
+      const izin = pList.filter((p) => p.status === 'izin').length;
+      const alpha = pList.filter((p) => p.status === 'alpha').length;
+      const total = hadir + terlambat + sakit + izin + alpha;
+      const rate = (hadir + terlambat) > 0 ? Math.round((hadir / (hadir + terlambat)) * 100) : 0;
+      const raw = hadir * 100 + terlambat * 40 + sakit * 75 + izin * 70 - alpha * 50;
+      const score = Math.max(0, Math.min(100, total > 0 ? Math.round(raw / (total * 100) * 100) : 0));
+      return {
+        rank: idx + 1,
+        lateRank: idx + 1,
+        isTied: false,
+        studentId: std.id,
+        nis: std.nis,
+        fullName: std.fullName,
+        className: std.className || 'Kelas',
+        hadirCount: hadir,
+        terlambatCount: terlambat,
+        sakitCount: sakit,
+        izinCount: izin,
+        alphaCount: alpha,
+        toiletOverdueCount: 0,
+        totalRecords: total,
+        timelinessRate: rate,
+        attendanceRate: rate,
+        disciplineScore: score,
+        predikat: score >= 90 ? 'Sangat Disiplin' : score >= 75 ? 'Disiplin' : score >= 60 ? 'Cukup Disiplin' : 'Perlu Pembinaan',
+      };
+    });
+    return {
+      success: true,
+      rankings,
+      summary: {
+        totalEvaluated: rankings.length,
+        averageScore: 85,
+        totalLate: rankings.reduce((a, b) => a + b.terlambatCount, 0),
+        totalHadir: rankings.reduce((a, b) => a + b.hadirCount, 0),
+      },
+    };
+  }
+
+  // 8.D /api/admin/discipline-settings
+  if (pathOnly === '/api/admin/discipline-settings') {
+    return {
+      success: true,
+      settings: {
+        bobotHadirTepatWaktu: 100,
+        bobotTerlambat: 40,
+        bobotSakit: 75,
+        bobotIzin: 70,
+        bobotAlpha: -50,
+        penaltiToiletOverdue: -10,
+        minimumPresensiHari: 1,
+      },
+    };
+  }
+
+  // 8.E /api/superadmin/auto-create-master-database
+  if (pathOnly === '/api/superadmin/auto-create-master-database') {
+    db.masterDriveFolderId = `fld-master-${Date.now()}`;
+    db.masterSpreadsheetId = `sheet-master-${Date.now()}`;
+    db.configVersion = (db.configVersion || 1) + 1;
+    saveLocalDB(db);
+    return {
+      success: true,
+      message: 'Database Master Superadmin berhasil dibuat otomatis.',
+      masterDriveFolderId: db.masterDriveFolderId,
+      masterSpreadsheetId: db.masterSpreadsheetId,
     };
   }
 

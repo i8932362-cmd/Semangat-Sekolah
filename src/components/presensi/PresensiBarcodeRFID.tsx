@@ -66,6 +66,34 @@ export const PresensiBarcodeRFID: React.FC = () => {
   const lastScanTimestampRef = useRef<number>(0);
   const lastScannedCodeRef = useRef<string>('');
 
+  // Sesi Presensi Aktif Otomatis Real-Time (Pergantian Otomatis Tiap 10 Detik)
+  const [sessionInfo, setSessionInfo] = useState<{
+    activeSession: any | null;
+    nextSession: any | null;
+    serverTime: string;
+    serverDate: string;
+    dayName: string;
+    status: 'active' | 'outside_schedule' | 'break' | 'holiday';
+    message: string;
+  } | null>(null);
+
+  const fetchCurrentSession = useCallback(async () => {
+    try {
+      const res = await api.getCurrentSession();
+      if (res && res.success) {
+        setSessionInfo(res);
+      }
+    } catch (e) {
+      console.warn('Gagal memuat status sesi presensi aktif:', e);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchCurrentSession();
+    const interval = setInterval(fetchCurrentSession, 10000);
+    return () => clearInterval(interval);
+  }, [fetchCurrentSession]);
+
   // Keep isProcessingRef in sync
   useEffect(() => {
     isProcessingRef.current = isProcessing;
@@ -339,6 +367,7 @@ export const PresensiBarcodeRFID: React.FC = () => {
       const res = await api.recordPresensi({
         code: trimmed,
         method: 'rfid',
+        sessionId: sessionInfo?.activeSession?.id || 'auto',
         notes: `Pemindaian instan RFID/Barcode: ${trimmed}`,
       });
 
@@ -515,6 +544,57 @@ export const PresensiBarcodeRFID: React.FC = () => {
             <span>Beep: {soundEnabled ? 'Aktif' : 'Mati'}</span>
           </button>
         </div>
+      </div>
+
+      {/* Live Session Status Banner (Pergantian Sesi Presensi Otomatis) */}
+      <div className="w-full">
+        {sessionInfo?.status === 'active' && sessionInfo.activeSession ? (
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 bg-gradient-to-r from-emerald-50 via-teal-50 to-emerald-100/50 border border-emerald-300 rounded-2xl shadow-xs">
+            <div className="flex items-center gap-2.5">
+              <span className="relative flex h-3 w-3">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-600"></span>
+              </span>
+              <div>
+                <span className="text-xs font-black text-emerald-950 uppercase tracking-wide flex items-center gap-1.5">
+                  <Clock className="w-3.5 h-3.5 text-emerald-700" />
+                  Sesi Aktif: {sessionInfo.activeSession.sessionName}
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-600 text-white font-bold ml-1">
+                    {sessionInfo.activeSession.entryStartTime} - {sessionInfo.activeSession.exitTime || sessionInfo.activeSession.transitionTime || sessionInfo.activeSession.lateLimitTime} WIB
+                  </span>
+                </span>
+                <span className="text-[11px] text-emerald-800 block mt-0.5">
+                  Batas Hadir Tepat Waktu: <strong className="font-bold">{sessionInfo.activeSession.entryLimitTime} WIB</strong> (Lewat jam ini otomatis terlambat)
+                </span>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 text-xs font-mono text-emerald-900 bg-white/80 px-3 py-1.5 rounded-xl border border-emerald-200 shrink-0">
+              <Radio className="w-3.5 h-3.5 text-emerald-600 animate-pulse" />
+              <span>Server: {sessionInfo.serverTime || 'WIB'}</span>
+            </div>
+          </div>
+        ) : sessionInfo?.status === 'break' ? (
+          <div className="p-3.5 bg-amber-50 border border-amber-300 rounded-2xl shadow-xs flex items-center justify-between gap-3 text-xs">
+            <div className="flex items-center gap-2 text-amber-900">
+              <Clock className="w-4 h-4 text-amber-600 shrink-0" />
+              <span><strong>Waktu Istirahat Sekolah:</strong> {sessionInfo.message}</span>
+            </div>
+            <span className="text-[11px] text-amber-700 font-mono">Server: {sessionInfo.serverTime}</span>
+          </div>
+        ) : (
+          <div className="p-3.5 bg-slate-100 border border-slate-300 rounded-2xl shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+            <div className="flex items-center gap-2 text-slate-800">
+              <Clock className="w-4 h-4 text-slate-500 shrink-0" />
+              <div>
+                <span className="font-bold text-slate-900 block">Di Luar Jadwal Presensi Normal</span>
+                <span className="text-[11px] text-slate-600">{sessionInfo?.message || 'Menunggu jadwal sesi berikutnya dimulai...'}</span>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 font-mono text-[11px] text-slate-600 bg-white px-3 py-1.5 rounded-xl border border-slate-200 shrink-0">
+              <span>{sessionInfo?.dayName || 'Hari Ini'}, {sessionInfo?.serverTime || 'WIB'}</span>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Area Pemindaian Barcode & RFID */}

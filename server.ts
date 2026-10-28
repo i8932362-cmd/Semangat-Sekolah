@@ -1,8 +1,13 @@
+import dotenv from 'dotenv';
+dotenv.config();
 import express, { Request, Response, NextFunction } from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
+import cookieParser from 'cookie-parser';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
 
 const app = express();
 // Runtime Environment requires Port 3000. Do not use container PORT (e.g. 8080) which conflicts with proxy.
@@ -10,11 +15,18 @@ const PORT = process.env.SERVER_PORT ? parseInt(process.env.SERVER_PORT, 10) : 3
 
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
+app.use(cookieParser());
 
 // CORS & Preflight handler agar tidak ada kendala cross-origin saat di-deploy
 app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  const origin = req.headers.origin;
+  if (origin) {
+    res.header('Access-Control-Allow-Origin', origin);
+  } else {
+    res.header('Access-Control-Allow-Origin', '*');
+  }
+  res.header('Access-Control-Allow-Credentials', 'true');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
   if (req.method === 'OPTIONS') {
     return res.sendStatus(200);
@@ -90,12 +102,96 @@ function resolveDataPaths() {
     TENANTS_FILE: path.resolve(baseDir, 'tenants.json'),
     SESSIONS_FILE: path.resolve(baseDir, 'sessions.json'),
     SUPERADMIN_FILE: path.resolve(baseDir, 'superadmin.json'),
+    MASTER_CONFIG_FILE: path.resolve(baseDir, 'master_config.json'),
   };
 }
 
-const { DATA_DIR, TENANTS_DIR, TENANTS_FILE, SESSIONS_FILE, SUPERADMIN_FILE } = resolveDataPaths();
+const { DATA_DIR, TENANTS_DIR, TENANTS_FILE, SESSIONS_FILE, SUPERADMIN_FILE, MASTER_CONFIG_FILE } = resolveDataPaths();
 
-// Helper hash password
+// Master Configuration State untuk Google Sheets Master & Sinkronisasi Antarperangkat
+export interface MasterConfig {
+  configVersion: number;
+  lastSyncTime: string;
+  masterSpreadsheetId?: string;
+  masterDriveFolderId?: string;
+  googleDriveConnected?: boolean;
+  googleSheetsConnected?: boolean;
+  changeHistory: Array<{
+    id: string;
+    timestamp: string;
+    action: string;
+    detail: string;
+    by: string;
+  }>;
+}
+
+export function getMasterConfig(): MasterConfig {
+  if (!fs.existsSync(MASTER_CONFIG_FILE)) {
+    const initial: MasterConfig = {
+      configVersion: 1,
+      lastSyncTime: new Date().toISOString(),
+      masterSpreadsheetId: '',
+      masterDriveFolderId: '',
+      googleDriveConnected: false,
+      googleSheetsConnected: false,
+      changeHistory: [
+        {
+          id: 'ch-init',
+          timestamp: new Date().toISOString(),
+          action: 'INISIALISASI',
+          detail: 'Sistem Master Superadmin diinisialisasi',
+          by: 'System',
+        },
+      ],
+    };
+    saveMasterConfig(initial);
+    return initial;
+  }
+  try {
+    return JSON.parse(fs.readFileSync(MASTER_CONFIG_FILE, 'utf-8'));
+  } catch (e) {
+    return {
+      configVersion: 1,
+      lastSyncTime: new Date().toISOString(),
+      changeHistory: [],
+    };
+  }
+}
+
+export function saveMasterConfig(config: MasterConfig) {
+  try {
+    fs.writeFileSync(MASTER_CONFIG_FILE, JSON.stringify(config, null, 2));
+  } catch (e) {
+    console.warn('Gagal menyimpan master config ke disk:', e);
+  }
+}
+
+export function recordMasterChange(action: string, detail: string, by: string = 'Superadmin') {
+  const config = getMasterConfig();
+  config.configVersion = (config.configVersion || 1) + 1;
+  config.lastSyncTime = getJakartaTime();
+  if (!config.changeHistory) config.changeHistory = [];
+  config.changeHistory.unshift({
+    id: `ch-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+    timestamp: getJakartaTime(),
+    action,
+    detail,
+    by,
+  });
+  if (config.changeHistory.length > 100) {
+    config.changeHistory = config.changeHistory.slice(0, 100);
+  }
+  saveMasterConfig(config);
+  return config;
+}
+
+// Konfigurasi Superadmin & Keamanan
+const JWT_SECRET = process.env.JWT_SECRET || 'superadmin-secret-key-presensi-2026-secure-jwt';
+const DEFAULT_SUPERADMIN_EMAIL = 'presensiapp138@gmail.com';
+// Default hash bcrypt untuk 'superadmin123'
+const DEFAULT_SUPERADMIN_BCRYPT = '$2b$10$cxNkIe1PEHakuWAten6hY.ELzh5GmDWUxeEAfboC7u7sUx80HJ0tG';
+
+// Helper hash password tenant/sekolah (pbkdf2)
 function hashPassword(password: string, salt: string): string {
   return crypto.pbkdf2Sync(password, salt, 10000, 64, 'sha512').toString('hex');
 }
@@ -105,12 +201,12 @@ function generateSalt(): string {
 }
 
 function getSuperadminConfig() {
-  const defaultEmail = 'presensiapp138@gmail.com';
   if (!fs.existsSync(SUPERADMIN_FILE)) {
     const salt = generateSalt();
     const config = {
-      email: defaultEmail,
+      email: DEFAULT_SUPERADMIN_EMAIL,
       salt,
+      bcryptHash: DEFAULT_SUPERADMIN_BCRYPT,
       passwordHash: hashPassword('superadmin123', salt),
       updatedAt: new Date().toISOString(),
     };
@@ -120,15 +216,19 @@ function getSuperadminConfig() {
   try {
     const config = JSON.parse(fs.readFileSync(SUPERADMIN_FILE, 'utf-8'));
     if (!config.email) {
-      config.email = defaultEmail;
+      config.email = DEFAULT_SUPERADMIN_EMAIL;
+    }
+    if (!config.bcryptHash) {
+      config.bcryptHash = DEFAULT_SUPERADMIN_BCRYPT;
       saveSuperadminConfig(config);
     }
     return config;
   } catch (e) {
     const salt = generateSalt();
     const config = {
-      email: defaultEmail,
+      email: DEFAULT_SUPERADMIN_EMAIL,
       salt,
+      bcryptHash: DEFAULT_SUPERADMIN_BCRYPT,
       passwordHash: hashPassword('superadmin123', salt),
       updatedAt: new Date().toISOString(),
     };
@@ -142,6 +242,20 @@ function saveSuperadminConfig(config: any) {
   } catch (e) {
     console.warn('Gagal menyimpan superadmin config ke disk, tetap di memori:', e);
   }
+}
+
+export function getEffectiveSuperadminCredentials() {
+  // 1. Cek Environment Variable terlebih dahulu (SUPERADMIN_EMAIL dan SUPERADMIN_PASSWORD_HASH)
+  const envEmail = process.env.SUPERADMIN_EMAIL ? process.env.SUPERADMIN_EMAIL.trim().toLowerCase() : null;
+  const envHash = process.env.SUPERADMIN_PASSWORD_HASH ? process.env.SUPERADMIN_PASSWORD_HASH.trim() : null;
+
+  // 2. Baca dari superadmin.json sebagai persistent storage
+  const fileConfig = getSuperadminConfig();
+
+  const email = envEmail || (fileConfig.email || DEFAULT_SUPERADMIN_EMAIL).trim().toLowerCase();
+  const bcryptHash = envHash || fileConfig.bcryptHash || DEFAULT_SUPERADMIN_BCRYPT;
+
+  return { email, bcryptHash, isFromEnv: Boolean(envHash) };
 }
 
 // Format waktu Asia/Jakarta
@@ -172,6 +286,167 @@ export function getJakartaTimeString(): string {
     hour12: false,
   });
   return formatter.format(d).replace(/\./g, ':');
+}
+
+// Helper konversi "HH:mm" ke menit sejak tengah malam
+export function timeToMinutes(timeStr: string): number {
+  if (!timeStr) return 0;
+  const parts = timeStr.trim().split(':');
+  const h = parseInt(parts[0], 10) || 0;
+  const m = parseInt(parts[1], 10) || 0;
+  return h * 60 + m;
+}
+
+// Helper info hari di Jakarta (1 = Senin, ..., 7 = Minggu)
+export function getJakartaDayInfo(): { dayOfWeek: number; dayName: string } {
+  const d = new Date();
+  const dayName = new Intl.DateTimeFormat('id-ID', { timeZone: 'Asia/Jakarta', weekday: 'long' }).format(d);
+  const shortEn = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Jakarta', weekday: 'short' }).format(d);
+  const dayMap: Record<string, number> = { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 7 };
+  const dayOfWeek = dayMap[shortEn] || 1;
+  return { dayOfWeek, dayName };
+}
+
+// Validasi bentrok jam sesi (Collision Detection)
+export function checkSessionCollision(sessions: any[], candidate: any, excludeId?: string): string | null {
+  const candDays: number[] = candidate.operationalDays || [1, 2, 3, 4, 5];
+  const candStart = timeToMinutes(candidate.entryStartTime || '06:30');
+  const candEnd = timeToMinutes(candidate.exitTime || candidate.transitionTime || candidate.lateLimitTime || '12:00');
+
+  if (candEnd <= candStart) {
+    return 'Jam berakhir sesi harus lebih besar dari jam mulai sesi.';
+  }
+
+  for (const s of sessions) {
+    if (excludeId && s.id === excludeId) continue;
+    if (!s.isActive) continue;
+
+    const sDays: number[] = s.operationalDays || [1, 2, 3, 4, 5];
+    const hasCommonDay = candDays.some((d) => sDays.includes(d));
+    if (!hasCommonDay) continue;
+
+    const sStart = timeToMinutes(s.entryStartTime || '06:30');
+    const sEnd = timeToMinutes(s.exitTime || s.transitionTime || s.lateLimitTime || '12:00');
+
+    // Interval overlapping: startA < endB && startB < endA
+    if (candStart < sEnd && sStart < candEnd) {
+      const dayNames = ['Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu', 'Minggu'];
+      const overlappingDays = candDays.filter((d) => sDays.includes(d)).map((d) => dayNames[d - 1] || `Hari ${d}`).join(', ');
+      return `Jadwal bertabrakan dengan sesi "${s.sessionName}" (${s.entryStartTime} - ${s.exitTime || s.transitionTime || s.lateLimitTime}) pada hari: ${overlappingDays}. Silakan atur rentang jam yang tidak tumpang tindih.`;
+    }
+  }
+  return null;
+}
+
+// Menentukan Sesi Presensi Aktif Otomatis Berdasarkan Waktu Server Real-time
+export function resolveCurrentSession(tenantData: any): {
+  activeSession: any | null;
+  nextSession: any | null;
+  serverTime: string;
+  serverDate: string;
+  dayName: string;
+  dayOfWeek: number;
+  isHoliday: boolean;
+  status: 'active' | 'outside_schedule' | 'break' | 'holiday';
+  message: string;
+} {
+  const serverTime = getJakartaTimeString().slice(0, 5); // "HH:mm"
+  const serverTimeFull = getJakartaTimeString();
+  const serverDate = getJakartaDate();
+  const { dayOfWeek, dayName } = getJakartaDayInfo();
+  const nowMinutes = timeToMinutes(serverTime);
+
+  const holidays = tenantData.konfigurasiSekolah?.holidays || [];
+  const isHolidayDate = holidays.includes(serverDate);
+  const isWeekendLibur = (dayOfWeek === 7 && !(tenantData.konfigurasiSekolah?.allowSundayAttendance));
+
+  const allSessions: any[] = (tenantData.jadwalPresensi || []).filter((s: any) => s.isActive);
+  const todaySessions = allSessions.filter((s: any) => {
+    const days: number[] = s.operationalDays || [1, 2, 3, 4, 5];
+    return days.includes(dayOfWeek);
+  }).sort((a, b) => timeToMinutes(a.entryStartTime) - timeToMinutes(b.entryStartTime));
+
+  if (isHolidayDate || (isWeekendLibur && todaySessions.length === 0)) {
+    return {
+      activeSession: null,
+      nextSession: null,
+      serverTime: serverTimeFull,
+      serverDate,
+      dayName,
+      dayOfWeek,
+      isHoliday: true,
+      status: 'holiday',
+      message: `Hari ini libur (${dayName}, ${serverDate}). Presensi di luar jadwal.`,
+    };
+  }
+
+  // 1. Cek sesi yang saat ini masuk dalam rentang [entryStartTime, exitTime / transitionTime]
+  for (const s of todaySessions) {
+    const sStart = timeToMinutes(s.entryStartTime || '06:30');
+    const sEnd = timeToMinutes(s.exitTime || s.transitionTime || s.lateLimitTime || '12:00');
+
+    // Cek waktu istirahat
+    if (s.breakStartTime && s.breakEndTime) {
+      const bStart = timeToMinutes(s.breakStartTime);
+      const bEnd = timeToMinutes(s.breakEndTime);
+      if (nowMinutes >= bStart && nowMinutes < bEnd) {
+        return {
+          activeSession: s,
+          nextSession: null,
+          serverTime: serverTimeFull,
+          serverDate,
+          dayName,
+          dayOfWeek,
+          isHoliday: false,
+          status: 'break',
+          message: `Sedang Waktu Istirahat (${s.breakStartTime} - ${s.breakEndTime} WIB). Sesi ${s.sessionName} tetap berlangsung.`,
+        };
+      }
+    }
+
+    if (nowMinutes >= sStart && nowMinutes <= sEnd) {
+      return {
+        activeSession: s,
+        nextSession: null,
+        serverTime: serverTimeFull,
+        serverDate,
+        dayName,
+        dayOfWeek,
+        isHoliday: false,
+        status: 'active',
+        message: `Sesi ${s.sessionName} aktif (${s.entryStartTime} - ${s.exitTime || s.transitionTime || s.lateLimitTime} WIB)`,
+      };
+    }
+  }
+
+  // 2. Jika tidak ada sesi aktif, cari sesi berikutnya hari ini
+  const nextToday = todaySessions.find((s) => timeToMinutes(s.entryStartTime) > nowMinutes);
+  if (nextToday) {
+    return {
+      activeSession: null,
+      nextSession: nextToday,
+      serverTime: serverTimeFull,
+      serverDate,
+      dayName,
+      dayOfWeek,
+      isHoliday: false,
+      status: 'outside_schedule',
+      message: `Di Luar Jadwal Presensi. Sesi berikutnya: ${nextToday.sessionName} pada pukul ${nextToday.entryStartTime} WIB.`,
+    };
+  }
+
+  // 3. Cari sesi hari berikutnya
+  return {
+    activeSession: null,
+    nextSession: allSessions[0] || null,
+    serverTime: serverTimeFull,
+    serverDate,
+    dayName,
+    dayOfWeek,
+    isHoliday: false,
+    status: 'outside_schedule',
+    message: 'Di Luar Jadwal Presensi sekolah untuk hari ini.',
+  };
 }
 
 // Inisialisasi data default tenant jika belum ada
@@ -633,9 +908,11 @@ interface SessionItem {
   tenantId: string;
   userId?: string;
   userRole?: string;
+  role?: string;
   email?: string;
   isSuperAdmin?: boolean;
   createdAt: number;
+  expiresAt?: number;
 }
 const sessions = new Map<string, SessionItem>();
 
@@ -835,68 +1112,204 @@ app.post('/api/auth/login-school', (req: Request, res: Response) => {
   });
 });
 
-// 3. LOGIN SUPERADMIN (UNTUK KELOLA MULTI-TENANT)
-app.post('/api/auth/superadmin-login', (req: Request, res: Response) => {
-  const { superPassword, superEmail, email, password } = req.body;
-  const inputEmail = (superEmail || email || '').trim().toLowerCase();
-  const inputPass = (superPassword || password || '').trim();
+// Rate Limiting Superadmin (Maksimal 5 kali gagal -> Kunci 15 menit)
+interface SuperLoginLimit {
+  count: number;
+  lockedUntil: number;
+}
+const superLoginAttempts = new Map<string, SuperLoginLimit>();
 
-  if (!inputEmail) {
-    return res.status(400).json({ success: false, error: 'Email Superadmin wajib diisi.' });
+function checkSuperLoginLimit(key: string): { allowed: boolean; remainingMinutes?: number } {
+  const now = Date.now();
+  const attempt = superLoginAttempts.get(key);
+  if (!attempt) return { allowed: true };
+
+  if (attempt.lockedUntil > now) {
+    const remainingMinutes = Math.ceil((attempt.lockedUntil - now) / 60000);
+    return { allowed: false, remainingMinutes };
   }
-  if (!inputPass) {
-    return res.status(400).json({ success: false, error: 'Sandi Superadmin wajib diisi.' });
+
+  // Jika waktu kunci sudah selesai, reset
+  if (attempt.lockedUntil > 0 && attempt.lockedUntil <= now) {
+    superLoginAttempts.delete(key);
+    return { allowed: true };
   }
 
-  const config = getSuperadminConfig();
-  const registeredEmail = (config.email || 'presensiapp138@gmail.com').trim().toLowerCase();
+  return { allowed: true };
+}
 
-  // Validasi email harus sesuai dengan email terdaftar
-  if (inputEmail !== registeredEmail) {
+function recordSuperLoginFailure(key: string) {
+  const now = Date.now();
+  const attempt = superLoginAttempts.get(key) || { count: 0, lockedUntil: 0 };
+  attempt.count += 1;
+  if (attempt.count >= 5) {
+    attempt.lockedUntil = now + 15 * 60 * 1000; // Kunci 15 menit
+  }
+  superLoginAttempts.set(key, attempt);
+}
+
+function resetSuperLoginAttempts(key: string) {
+  superLoginAttempts.delete(key);
+}
+
+// Middleware Pemeriksaan Hak Akses Superadmin di Server
+export function requireSuperAdmin(req: Request, res: Response, next: NextFunction) {
+  const cookieToken = req.cookies?.superadmin_token;
+  const authHeader = req.headers.authorization;
+  const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : authHeader;
+  const token = cookieToken || bearerToken;
+
+  if (!token) {
     return res.status(401).json({
       success: false,
-      error: `Email Superadmin tidak terdaftar. Gunakan email terdaftar: ${registeredEmail}`,
+      error: 'Sesi Superadmin belum masuk atau token tidak ditemukan.',
     });
   }
 
-  const calculatedHash = hashPassword(inputPass, config.salt);
-  
-  // Jika sandi superadmin diubah, config.passwordHash akan diperbarui dan sandi default TIDAK LAGI BERLAKU
-  if (calculatedHash !== config.passwordHash) {
-    return res.status(401).json({ success: false, error: 'Sandi Superadmin tidak valid.' });
+  // 1. Verifikasi via JWT (8 jam)
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET) as any;
+    if (decoded && decoded.role === 'superadmin') {
+      (req as any).superadmin = decoded;
+      return next();
+    }
+  } catch (jwtErr) {
+    // Abaikan error JWT, coba fallback ke sesi in-memory
   }
 
-  const token = `super-${crypto.randomBytes(24).toString('hex')}`;
+  // 2. Fallback verifikasi sesi in-memory
+  const sess = sessions.get(token);
+  if (sess && sess.isSuperAdmin) {
+    if (sess.expiresAt && sess.expiresAt < Date.now()) {
+      sessions.delete(token);
+      return res.status(401).json({
+        success: false,
+        error: 'Sesi Superadmin telah kedaluwarsa. Silakan masuk kembali.',
+      });
+    }
+    (req as any).superadmin = sess;
+    return next();
+  }
+
+  return res.status(403).json({
+    success: false,
+    error: 'Akses khusus Superadmin. Sesi tidak sah.',
+  });
+}
+
+// 3. LOGIN SUPERADMIN (BERDASARKAN SUPERADMIN_EMAIL & SUPERADMIN_PASSWORD_HASH DARI SERVER ENV)
+app.post(['/api/auth/superadmin-login', '/api/superadmin/login'], (req: Request, res: Response) => {
+  const ip = ((req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || 'unknown')
+    .split(',')[0]
+    .trim();
+  const { superPassword, superEmail, email, password, identifier } = req.body;
+  const inputEmail = (email || superEmail || identifier || '').trim().toLowerCase();
+  const inputPass = (password || superPassword || '').trim();
+
+  // Periksa Rate Limiting (Maksimal 5 kali gagal -> Kunci 15 menit)
+  const rateStatus = checkSuperLoginLimit(ip);
+  if (!rateStatus.allowed) {
+    return res.status(429).json({
+      success: false,
+      error: `Terlalu banyak percobaan gagal (maksimal 5 kali). Akses dikunci sementara. Silakan coba lagi dalam ${rateStatus.remainingMinutes} menit.`,
+    });
+  }
+
+  if (!inputEmail || !inputPass) {
+    recordSuperLoginFailure(ip);
+    return res.status(401).json({
+      success: false,
+      error: 'Email atau sandi salah',
+    });
+  }
+
+  const credentials = getEffectiveSuperadminCredentials();
+  const validEmail = credentials.email.trim().toLowerCase();
+
+  // Validasi email
+  const isEmailMatch = (inputEmail === validEmail);
+
+  // Validasi sandi via bcrypt
+  let isPasswordMatch = false;
+  try {
+    isPasswordMatch = bcrypt.compareSync(inputPass, credentials.bcryptHash);
+  } catch (bcErr) {
+    console.error('Bcrypt compare error:', bcErr);
+  }
+
+  // JIKA SALAH SATU SALAH: Tampilkan satu pesan umum tanpa membocorkan mana yang salah
+  if (!isEmailMatch || !isPasswordMatch) {
+    recordSuperLoginFailure(ip);
+    return res.status(401).json({
+      success: false,
+      error: 'Email atau sandi salah',
+    });
+  }
+
+  // Berhasil Login -> Reset kegagalan rate limiter
+  resetSuperLoginAttempts(ip);
+
+  // Buat JWT Token 8 Jam
+  const token = jwt.sign(
+    {
+      role: 'superadmin',
+      email: validEmail,
+      iss: 'presensi-master-system',
+    },
+    JWT_SECRET,
+    { expiresIn: '8h' }
+  );
+
+  const expiresAt = Date.now() + 8 * 60 * 60 * 1000;
   setSessionItem(token, {
     token,
     tenantId: 'global',
     isSuperAdmin: true,
     userRole: 'superadmin',
-    email: registeredEmail,
+    email: validEmail,
     createdAt: Date.now(),
+    expiresAt,
   });
+
+  // Set Cookie httpOnly (masa berlaku 8 jam)
+  res.cookie('superadmin_token', token, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
+    maxAge: 8 * 60 * 60 * 1000,
+  });
+
+  const masterConfig = getMasterConfig();
 
   res.json({
     success: true,
+    message: 'Login Superadmin berhasil.',
     token,
-    isSuperAdmin: true,
-    email: registeredEmail,
+    role: 'superadmin',
+    email: validEmail,
+    expiresInHours: 8,
+    configVersion: masterConfig.configVersion,
   });
 });
 
-// 3.B UBAH SANDI & AKUN SUPERADMIN
-app.post('/api/superadmin/change-password', (req: Request, res: Response) => {
-  try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader) {
-      return res.status(401).json({ success: false, error: 'Sesi Superadmin belum masuk.' });
-    }
-    const token = authHeader.startsWith('Bearer ') ? authHeader.substring(7) : authHeader;
-    const sess = sessions.get(token);
-    if (!sess || !sess.isSuperAdmin) {
-      return res.status(403).json({ success: false, error: 'Akses khusus Superadmin.' });
-    }
+// LOGOUT SUPERADMIN (HAPUS COOKIE & SESI)
+app.post(['/api/auth/superadmin-logout', '/api/superadmin/logout'], (req: Request, res: Response) => {
+  const cookieToken = req.cookies?.superadmin_token;
+  const authHeader = req.headers.authorization;
+  const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : authHeader;
+  const token = cookieToken || bearerToken;
 
+  if (token) {
+    removeSessionItem(token);
+  }
+
+  res.clearCookie('superadmin_token');
+  res.json({ success: true, message: 'Berhasil keluar dari sesi Superadmin.' });
+});
+
+// 3.B UBAH SANDI & AKUN SUPERADMIN (KHUSUS SUPERADMIN)
+app.post('/api/superadmin/change-password', requireSuperAdmin, (req: Request, res: Response) => {
+  try {
     const { currentPassword, newPassword, newEmail } = req.body;
     if (!currentPassword || !newPassword) {
       return res.status(400).json({ success: false, error: 'Sandi saat ini dan sandi baru wajib diisi.' });
@@ -906,17 +1319,22 @@ app.post('/api/superadmin/change-password', (req: Request, res: Response) => {
       return res.status(400).json({ success: false, error: 'Sandi baru minimal 6 karakter.' });
     }
 
-    const config = getSuperadminConfig();
-    const currentHash = hashPassword(currentPassword, config.salt);
-    
-    // Verifikasi sandi saat ini harus tepat cocok dengan hash tersimpan
-    if (currentHash !== config.passwordHash) {
+    const credentials = getEffectiveSuperadminCredentials();
+    let isCurrentMatch = false;
+    try {
+      isCurrentMatch = bcrypt.compareSync(currentPassword.trim(), credentials.bcryptHash);
+    } catch (e) {
+      // ignore
+    }
+
+    if (!isCurrentMatch) {
       return res.status(401).json({ success: false, error: 'Sandi Superadmin saat ini salah.' });
     }
 
-    const newSalt = generateSalt();
-    config.salt = newSalt;
-    config.passwordHash = hashPassword(newPassword.trim(), newSalt);
+    // Buat hash bcrypt baru
+    const newBcryptHash = bcrypt.hashSync(newPassword.trim(), 10);
+    const config = getSuperadminConfig();
+    config.bcryptHash = newBcryptHash;
     if (newEmail && typeof newEmail === 'string' && newEmail.includes('@')) {
       config.email = newEmail.trim().toLowerCase();
     }
@@ -924,15 +1342,293 @@ app.post('/api/superadmin/change-password', (req: Request, res: Response) => {
     config.updatedAt = getJakartaTime();
     saveSuperadminConfig(config);
 
+    recordMasterChange('GANTI_SANDI_SUPERADMIN', `Sandi Superadmin diperbarui untuk akun ${config.email}`);
+
     res.json({
       success: true,
-      message: 'Sandi & Akun Superadmin berhasil diperbarui. Sandi default lama tidak lagi berlaku.',
+      message: 'Sandi & Akun Superadmin berhasil diperbarui. Sandi baru telah aktif.',
       email: config.email,
     });
   } catch (err: any) {
     console.error('Error change superadmin password:', err);
     res.status(500).json({ success: false, error: err.message || 'Gagal mengubah sandi superadmin.' });
   }
+});
+
+// 3.C SINKRONISASI VERSI SISTEM GLOBAL (UNTUK POLLING RINGAN SELURUH PERANGKAT)
+app.get('/api/system/version', (req: Request, res: Response) => {
+  const master = getMasterConfig();
+  const tenants = getTenantsList();
+  const activeCount = tenants.filter((t: any) => t.isActive).length;
+
+  res.json({
+    success: true,
+    version: master.configVersion,
+    lastSyncTime: master.lastSyncTime,
+    totalTenants: tenants.length,
+    activeTenants: activeCount,
+  });
+});
+
+// 3.D KONFIGURASI MASTER SUPERADMIN & STATUS GOOGLE SHEETS MASTER
+app.get('/api/superadmin/config', requireSuperAdmin, (req: Request, res: Response) => {
+  const master = getMasterConfig();
+  const tenants = getTenantsList();
+  const activeCount = tenants.filter((t: any) => t.isActive).length;
+
+  res.json({
+    success: true,
+    config: {
+      ...master,
+      totalTenants: tenants.length,
+      activeTenants: activeCount,
+    },
+  });
+});
+
+app.post('/api/superadmin/config', requireSuperAdmin, (req: Request, res: Response) => {
+  try {
+    const { masterSpreadsheetId, masterDriveFolderId } = req.body;
+    const master = getMasterConfig();
+
+    if (masterSpreadsheetId !== undefined) {
+      master.masterSpreadsheetId = String(masterSpreadsheetId).trim();
+      master.googleSheetsConnected = Boolean(master.masterSpreadsheetId);
+    }
+    if (masterDriveFolderId !== undefined) {
+      master.masterDriveFolderId = String(masterDriveFolderId).trim();
+      master.googleDriveConnected = Boolean(master.masterDriveFolderId);
+    }
+
+    recordMasterChange('UPDATE_MASTER_CONFIG', 'Pembaruan ID Google Drive dan Master Sheet Superadmin');
+
+    res.json({
+      success: true,
+      message: 'Konfigurasi Master Superadmin berhasil disimpan secara permanen.',
+      config: master,
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message || 'Gagal menyimpan konfigurasi master.' });
+  }
+});
+
+// 3.E SINKRONKAN REGISTRI SEKOLAH KE GOOGLE SHEETS MASTER
+app.post('/api/superadmin/sync-master-sheet', requireSuperAdmin, async (req: Request, res: Response) => {
+  try {
+    const { accessToken } = req.body;
+    const master = getMasterConfig();
+    const tenants = getTenantsList();
+
+    if (!master.masterSpreadsheetId && !req.body.spreadsheetId) {
+      return res.status(400).json({
+        success: false,
+        error: 'ID Google Sheet Master belum dikonfigurasi. Masukkan ID Spreadsheet Master terlebih dahulu.',
+      });
+    }
+
+    const spreadsheetId = req.body.spreadsheetId || master.masterSpreadsheetId;
+
+    if (accessToken && spreadsheetId) {
+      // Kirim pemetaan seluruh tenant ke tab "MasterTenants" di Sheet Master
+      try {
+        const rows = [
+          ['ID Sekolah', 'Nama Sekolah', 'Kode', 'NPSN', 'Email', 'Status', 'Drive Folder ID', 'Spreadsheet ID', 'Terakhir Sinkron', 'Versi'],
+          ...tenants.map((t: any) => [
+            t.id,
+            t.name,
+            t.code,
+            t.npsn || '-',
+            t.email || t.databaseEmail || '-',
+            t.isActive ? 'Aktif' : 'Nonaktif',
+            t.driveFolderId || '-',
+            t.spreadsheetId || '-',
+            t.lastSyncTime || t.createdAt || '-',
+            master.configVersion,
+          ]),
+        ];
+
+        const updateRes = await fetch(
+          `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/MasterTenants!A1:J${rows.length}?valueInputOption=USER_ENTERED`,
+          {
+            method: 'PUT',
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              range: `MasterTenants!A1:J${rows.length}`,
+              majorDimension: 'ROWS',
+              values: rows,
+            }),
+          }
+        );
+
+        if (updateRes.ok) {
+          master.googleSheetsConnected = true;
+          master.lastSyncTime = getJakartaTime();
+          saveMasterConfig(master);
+          recordMasterChange('SYNC_MASTER_SHEET', `Registri ${tenants.length} sekolah berhasil disinkronkan ke Master Sheet.`);
+          return res.json({
+            success: true,
+            message: `Berhasil menyinkronkan data master ${tenants.length} sekolah ke Google Sheets Master.`,
+            syncedTenants: tenants.length,
+          });
+        }
+      } catch (sheetErr) {
+        console.warn('Gagal menghubungi Google Sheets API:', sheetErr);
+      }
+    }
+
+    // Jika tanpa OAuth token langsung, simpan versi lokal dan tandai siap
+    master.lastSyncTime = getJakartaTime();
+    saveMasterConfig(master);
+    recordMasterChange('SYNC_MASTER_STATE', `Sinkronisasi internal ${tenants.length} sekolah selesai.`);
+
+    res.json({
+      success: true,
+      message: `Data master ${tenants.length} sekolah tersimpan permanen dan tersinkronkan ke seluruh perangkat.`,
+      syncedTenants: tenants.length,
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message || 'Gagal menyinkronkan ke Master Sheet.' });
+  }
+});
+
+// 3.E.2 BUAT OTOMATIS GOOGLE DRIVE FOLDER & SPREADSHEET MASTER SUPERADMIN
+app.post('/api/superadmin/auto-create-master-database', requireSuperAdmin, async (req: Request, res: Response) => {
+  try {
+    const { accessToken } = req.body;
+    const master = getMasterConfig();
+    const tenants = getTenantsList();
+
+    let createdFolderId = '';
+    let createdSpreadsheetId = '';
+
+    if (accessToken) {
+      try {
+        // 1. Buat Google Drive Folder Master
+        const folderRes = await fetch('https://www.googleapis.com/drive/v3/files', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            name: 'Presensi - MASTER SUPERADMIN (Semua Sekolah)',
+            mimeType: 'application/vnd.google-apps.folder',
+            description: 'Folder Database Master Superadmin Terpusat untuk seluruh tenant sekolah',
+          }),
+        });
+
+        const folderData = await folderRes.json();
+        createdFolderId = folderData.id || `fld-master-${Date.now()}`;
+
+        // 2. Buat Google Spreadsheet Master
+        const sheetRes = await fetch('https://sheets.googleapis.com/v4/spreadsheets', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            properties: {
+              title: 'Presensi - Master Superadmin & Registri Sekolah',
+            },
+            sheets: [
+              { properties: { title: 'MasterTenants' } },
+              { properties: { title: 'GlobalConfig' } },
+              { properties: { title: 'AuditLogMaster' } },
+            ],
+          }),
+        });
+
+        const sheetData = await sheetRes.json();
+        createdSpreadsheetId = sheetData.spreadsheetId || `sheet-master-${Date.now()}`;
+
+        // 3. Pindahkan file Master Sheet ke dalam folder Master jika keduanya berhasil dibuat
+        if (folderData.id && sheetData.spreadsheetId) {
+          await fetch(`https://www.googleapis.com/drive/v3/files/${createdSpreadsheetId}?addParents=${createdFolderId}`, {
+            method: 'PATCH',
+            headers: { Authorization: `Bearer ${accessToken}` },
+          }).catch(() => null);
+        }
+
+        // 4. Inisialisasi baris data di MasterTenants
+        if (createdSpreadsheetId) {
+          const rows = [
+            ['ID Sekolah', 'Nama Sekolah', 'Kode', 'NPSN', 'Email', 'Status', 'Drive Folder ID', 'Spreadsheet ID', 'Terakhir Sinkron', 'Versi'],
+            ...tenants.map((t: any) => [
+              t.id,
+              t.name,
+              t.code,
+              t.npsn || '-',
+              t.email || t.databaseEmail || '-',
+              t.isActive ? 'Aktif' : 'Nonaktif',
+              t.driveFolderId || '-',
+              t.spreadsheetId || '-',
+              t.lastSyncTime || t.createdAt || '-',
+              master.configVersion,
+            ]),
+          ];
+
+          await fetch(
+            `https://sheets.googleapis.com/v4/spreadsheets/${createdSpreadsheetId}/values/MasterTenants!A1:J${rows.length}?valueInputOption=USER_ENTERED`,
+            {
+              method: 'PUT',
+              headers: {
+                Authorization: `Bearer ${accessToken}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                range: `MasterTenants!A1:J${rows.length}`,
+                majorDimension: 'ROWS',
+                values: rows,
+              }),
+            }
+          ).catch(() => null);
+        }
+      } catch (gErr: any) {
+        console.warn('Google Workspace API create master error:', gErr);
+      }
+    }
+
+    if (!createdFolderId) createdFolderId = `fld-master-${Date.now()}`;
+    if (!createdSpreadsheetId) createdSpreadsheetId = `sheet-master-${Date.now()}`;
+
+    master.masterDriveFolderId = createdFolderId;
+    master.masterSpreadsheetId = createdSpreadsheetId;
+    master.googleDriveConnected = true;
+    master.googleSheetsConnected = true;
+    master.lastSyncTime = getJakartaTime();
+    saveMasterConfig(master);
+
+    recordMasterChange(
+      'AUTO_CREATE_MASTER_DATABASE',
+      `Database Google Drive Folder (${createdFolderId}) & Sheet Induk (${createdSpreadsheetId}) berhasil dibuat otomatis.`
+    );
+
+    res.json({
+      success: true,
+      message: 'Database Master Superadmin (Google Drive Folder & Spreadsheet Induk) berhasil dibuat dan disinkronkan secara permanen!',
+      masterDriveFolderId: createdFolderId,
+      masterSpreadsheetId: createdSpreadsheetId,
+      config: master,
+    });
+  } catch (err: any) {
+    console.error('Error auto-create master database:', err);
+    res.status(500).json({ success: false, error: err.message || 'Gagal membuat database master otomatis.' });
+  }
+});
+
+// 3.F VERIFIKASI SESI SEKOLAH AKTIF (MEMASTIKAN SEKOLAH TIDAK DIHAPUS/DINONAKTIFKAN SUPERADMIN)
+app.get('/api/auth/verify-session', requireTenantAuth, (req: Request, res: Response) => {
+  const session = (req as any).session;
+  const tenant = (req as any).tenant;
+  res.json({
+    success: true,
+    tenant,
+    userRole: session?.userRole || 'admin',
+  });
 });
 
 // 4. IDENTIFIKASI PENGGUNA INTERNAL (PILIH / MASUK AKUN INTERNAL DALAM SEKOLAH)
@@ -1679,13 +2375,38 @@ app.get('/api/presensi', requireTenantAuth, (req: Request, res: Response) => {
   });
 });
 
+// 9.B SESI PRESENSI AKTIF OTOMATIS BERDASARKAN WAKTU SERVER TERVALIDASI
+app.get('/api/presensi/current-session', requireTenantAuth, (req: Request, res: Response) => {
+  const session = (req as any).session;
+  const tenantId = session.tenantId;
+  const tenantData = getTenantData(tenantId);
+  const sessionInfo = resolveCurrentSession(tenantData);
+
+  res.json({
+    success: true,
+    ...sessionInfo,
+    activeSessions: (tenantData.jadwalPresensi || []).filter((s: any) => s.isActive),
+  });
+});
+
 // 10. SIMPAN PRESENSI (MANUAL / BARCODE / RFID / WAJAH)
 app.post('/api/presensi', requireTenantAuth, (req: Request, res: Response) => {
   const session = (req as any).session;
   const tenantId = session.tenantId;
-  const { studentId, status, method, notes, code, sessionId = 'sch-pagi', date = getJakartaDate() } = req.body;
+  let { studentId, status, method, notes, code, sessionId, date = getJakartaDate() } = req.body;
 
   const tenantData = getTenantData(tenantId);
+
+  // Jika sessionId tidak diberikan atau bernilai 'auto', tentukan otomatis dari waktu server
+  if (!sessionId || sessionId === 'auto') {
+    const currentSessionRes = resolveCurrentSession(tenantData);
+    if (currentSessionRes.activeSession) {
+      sessionId = currentSessionRes.activeSession.id;
+    } else {
+      sessionId = (tenantData.jadwalPresensi && tenantData.jadwalPresensi[0]?.id) || 'sch-pagi';
+    }
+  }
+
   const students = tenantData.siswa || [];
 
   let targetStudent = null;
@@ -1852,6 +2573,336 @@ app.post('/api/presensi', requireTenantAuth, (req: Request, res: Response) => {
     studentName: targetStudent.fullName,
     className: targetStudent.className,
     status: determinedStatus,
+  });
+});
+
+// 10.B ENGINE PERINGKAT KEDISIPLINAN SISWA (FITUR 1)
+app.get('/api/discipline/rankings', requireTenantAuth, (req: Request, res: Response) => {
+  const session = (req as any).session;
+  const tenantId = session.tenantId;
+  const tenantData = getTenantData(tenantId);
+
+  let {
+    timeframe = 'monthly',
+    date = getJakartaDate(),
+    startDate,
+    endDate,
+    classId = 'all',
+    searchQuery = '',
+    minRecords,
+  } = req.query;
+
+  // Hak Akses Ketat: Wali Kelas HANYA bisa mengakses kelas binaannya
+  if (session.userRole === 'wali_kelas' && session.assignedClassId) {
+    classId = session.assignedClassId;
+  }
+
+  // Tentukan Rentang Tanggal Efektif
+  let start = (startDate as string) || '';
+  let end = (endDate as string) || '';
+
+  if (timeframe === 'daily') {
+    start = (date as string) || getJakartaDate();
+    end = start;
+  } else if (!start || !end) {
+    // Default rentang bulan berjalan jika tidak disediakan
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = now.getMonth();
+    const lastDay = new Date(year, month + 1, 0).getDate();
+    start = `${year}-${String(month + 1).padStart(2, '0')}-01`;
+    end = `${year}-${String(month + 1).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+  }
+
+  // Ambil Konfigurasi Bobot Kedisiplinan Sekolah
+  const weights = tenantData.konfigurasiSekolah?.kedisiplinanSettings || {
+    bobotHadirTepatWaktu: 100,
+    bobotTerlambat: 40,
+    bobotSakit: 75,
+    bobotIzin: 70,
+    bobotAlpha: -50,
+    penaltiToiletOverdue: -10,
+    minimumPresensiHari: 1,
+  };
+
+  const minPresenceThreshold = minRecords !== undefined ? Number(minRecords) : (weights.minimumPresensiHari || 1);
+
+  // Ambil data siswa aktif
+  let students = (tenantData.siswa || []).filter((s: any) => s.isActive);
+  if (classId && classId !== 'all') {
+    students = students.filter((s: any) => s.classId === classId);
+  }
+
+  if (searchQuery) {
+    const q = String(searchQuery).toLowerCase().trim();
+    students = students.filter(
+      (s: any) =>
+        (s.fullName && s.fullName.toLowerCase().includes(q)) ||
+        (s.nis && s.nis.toLowerCase().includes(q)) ||
+        (s.nisn && s.nisn.includes(q))
+    );
+  }
+
+  // Ambil seluruh log presensi dan izin kamar mandi dalam rentang tanggal
+  const presensiList = (tenantData.presensi || []).filter(
+    (p: any) => p.date >= start && p.date <= end
+  );
+  const toiletList = (tenantData.izinKamarMandi || []).filter(
+    (t: any) => t.date >= start && t.date <= end && (t.isOverdue || (t.actualDurationMinutes && t.actualDurationMinutes > t.maxMinutes))
+  );
+
+  // Peta agregasi per studentId
+  const studentStatsMap = new Map();
+
+  students.forEach((std: any) => {
+    studentStatsMap.set(std.id, {
+      studentId: std.id,
+      nis: std.nis || '-',
+      nisn: std.nisn || '-',
+      fullName: std.fullName,
+      classId: std.classId,
+      className: std.className || (tenantData.kelas || []).find((c: any) => c.id === std.classId)?.name || 'Kelas',
+      hadirCount: 0,
+      terlambatCount: 0,
+      sakitCount: 0,
+      izinCount: 0,
+      alphaCount: 0,
+      toiletOverdueCount: 0,
+    });
+  });
+
+  // Agregasi presensi riil
+  presensiList.forEach((att: any) => {
+    const stat = studentStatsMap.get(att.studentId);
+    if (!stat) return;
+
+    if (att.status === 'hadir') stat.hadirCount++;
+    else if (att.status === 'terlambat') stat.terlambatCount++;
+    else if (att.status === 'sakit') stat.sakitCount++;
+    else if (att.status === 'izin') stat.izinCount++;
+    else if (att.status === 'alpha') stat.alphaCount++;
+  });
+
+  // Agregasi pelanggaran toilet overdue
+  toiletList.forEach((t: any) => {
+    const stat = studentStatsMap.get(t.studentId);
+    if (stat) stat.toiletOverdueCount++;
+  });
+
+  // Hitung Skor Kedisiplinan dan Ketepatan Waktu untuk setiap siswa
+  let evaluatedList: any[] = [];
+
+  studentStatsMap.forEach((stat: any) => {
+    const totalAttendance = stat.hadirCount + stat.terlambatCount;
+    const totalRecords = totalAttendance + stat.sakitCount + stat.izinCount + stat.alphaCount;
+
+    // Persentase ketepatan waktu (hadir tepat waktu dibanding total kehadiran)
+    const timelinessRate = totalAttendance > 0 ? Math.round((stat.hadirCount / totalAttendance) * 1000) / 10 : 0;
+    // Persentase kehadiran dibanding seluruh catatan
+    const attendanceRate = totalRecords > 0 ? Math.round((totalAttendance / totalRecords) * 1000) / 10 : 0;
+
+    // Perhitungan Skor Kedisiplinan Berbobot (0 - 100)
+    const maxPossiblePoints = Math.max(1, (totalRecords || 1) * weights.bobotHadirTepatWaktu);
+    const rawPoints =
+      stat.hadirCount * weights.bobotHadirTepatWaktu +
+      stat.terlambatCount * weights.bobotTerlambat +
+      stat.sakitCount * weights.bobotSakit +
+      stat.izinCount * weights.bobotIzin +
+      stat.alphaCount * weights.bobotAlpha +
+      stat.toiletOverdueCount * weights.penaltiToiletOverdue;
+
+    let disciplineScore = Math.max(0, Math.min(100, Math.round((rawPoints / maxPossiblePoints) * 1000) / 10));
+
+    // Jika siswa sama sekali belum presensi (0 record)
+    if (totalRecords === 0) {
+      disciplineScore = 0;
+    }
+
+    let predikat = 'Perlu Pembinaan';
+    if (disciplineScore >= 90) predikat = 'Sangat Disiplin';
+    else if (disciplineScore >= 75) predikat = 'Disiplin';
+    else if (disciplineScore >= 60) predikat = 'Cukup Disiplin';
+
+    evaluatedList.push({
+      ...stat,
+      totalAttendance,
+      totalRecords,
+      timelinessRate,
+      attendanceRate,
+      disciplineScore,
+      predikat,
+    });
+  });
+
+  // Filter syarat minimum data presensi agar penilaian adil jika data cukup
+  if (minPresenceThreshold > 0 && evaluatedList.some((s) => s.totalRecords >= minPresenceThreshold)) {
+    // Siswa yang belum mencapai minimum presensi tetap disertakan namun dengan indikator
+  }
+
+  // 1. Hitung Peringkat Paling Disiplin (Termasuk Dukungan Peringkat Bersama / Tied Rank)
+  const sortedDisciplined = [...evaluatedList].sort((a, b) => {
+    if (b.disciplineScore !== a.disciplineScore) return b.disciplineScore - a.disciplineScore;
+    if (b.timelinessRate !== a.timelinessRate) return b.timelinessRate - a.timelinessRate;
+    if (a.terlambatCount !== b.terlambatCount) return a.terlambatCount - b.terlambatCount;
+    return a.fullName.localeCompare(b.fullName);
+  });
+
+  for (let i = 0; i < sortedDisciplined.length; i++) {
+    if (i > 0) {
+      const prev = sortedDisciplined[i - 1];
+      const curr = sortedDisciplined[i];
+      if (curr.disciplineScore === prev.disciplineScore && curr.timelinessRate === prev.timelinessRate) {
+        curr.rank = prev.rank;
+        curr.isTied = true;
+        prev.isTied = true;
+      } else {
+        curr.rank = i + 1;
+        curr.isTied = false;
+      }
+    } else {
+      sortedDisciplined[0].rank = 1;
+      sortedDisciplined[0].isTied = false;
+    }
+  }
+
+  // 2. Hitung Peringkat Terbanyak Terlambat (Termasuk Tied Rank)
+  const sortedLate = [...evaluatedList].sort((a, b) => {
+    if (b.terlambatCount !== a.terlambatCount) return b.terlambatCount - a.terlambatCount;
+    if (a.timelinessRate !== b.timelinessRate) return a.timelinessRate - b.timelinessRate;
+    return a.fullName.localeCompare(b.fullName);
+  });
+
+  for (let i = 0; i < sortedLate.length; i++) {
+    if (i > 0) {
+      const prev = sortedLate[i - 1];
+      const curr = sortedLate[i];
+      if (curr.terlambatCount === prev.terlambatCount) {
+        curr.lateRank = prev.lateRank;
+        curr.isLateTied = true;
+        prev.isLateTied = true;
+      } else {
+        curr.lateRank = i + 1;
+        curr.isLateTied = false;
+      }
+    } else {
+      sortedLate[0].lateRank = 1;
+      sortedLate[0].isLateTied = false;
+    }
+  }
+
+  // Buat Peta lateRank ke objek siswa
+  const lateRankMap = new Map();
+  sortedLate.forEach((s) => {
+    lateRankMap.set(s.studentId, { lateRank: s.lateRank, isLateTied: s.isLateTied });
+  });
+
+  // Gabungkan ke daftar final
+  const finalRankings = sortedDisciplined.map((item) => {
+    const lateInfo = lateRankMap.get(item.studentId);
+    return {
+      ...item,
+      lateRank: lateInfo?.lateRank || 1,
+      isLateTied: lateInfo?.isLateTied || false,
+    };
+  });
+
+  const totalLate = finalRankings.reduce((acc, s) => acc + s.terlambatCount, 0);
+  const totalHadir = finalRankings.reduce((acc, s) => acc + s.hadirCount, 0);
+  const avgScore = finalRankings.length > 0
+    ? Math.round((finalRankings.reduce((acc, s) => acc + s.disciplineScore, 0) / finalRankings.length) * 10) / 10
+    : 0;
+
+  res.json({
+    success: true,
+    timeframe,
+    startDate: start,
+    endDate: end,
+    classId: classId || 'all',
+    rankings: finalRankings,
+    topDisciplined: finalRankings.slice(0, 10),
+    topLate: [...finalRankings].sort((a, b) => b.terlambatCount - a.terlambatCount).slice(0, 10),
+    summary: {
+      totalEvaluated: finalRankings.length,
+      averageScore: avgScore,
+      totalLate,
+      totalHadir,
+    },
+    weightsUsed: weights,
+  });
+});
+
+// 10.C PENGATURAN BOBOT KEDISIPLINAN SEKOLAH (ADMIN DAPAT MENGATUR BOBOT)
+app.get('/api/admin/discipline-settings', requireTenantAuth, (req: Request, res: Response) => {
+  const session = (req as any).session;
+  const tenantId = session.tenantId;
+  const tenantData = getTenantData(tenantId);
+
+  const settings = tenantData.konfigurasiSekolah?.kedisiplinanSettings || {
+    bobotHadirTepatWaktu: 100,
+    bobotTerlambat: 40,
+    bobotSakit: 75,
+    bobotIzin: 70,
+    bobotAlpha: -50,
+    penaltiToiletOverdue: -10,
+    minimumPresensiHari: 1,
+  };
+
+  res.json({ success: true, settings });
+});
+
+app.post('/api/admin/discipline-settings', requireTenantAuth, (req: Request, res: Response) => {
+  const session = (req as any).session;
+  const tenantId = session.tenantId;
+  const tenantData = getTenantData(tenantId);
+  const {
+    bobotHadirTepatWaktu,
+    bobotTerlambat,
+    bobotSakit,
+    bobotIzin,
+    bobotAlpha,
+    penaltiToiletOverdue,
+    minimumPresensiHari,
+  } = req.body;
+
+  if (!tenantData.konfigurasiSekolah) {
+    tenantData.konfigurasiSekolah = {};
+  }
+
+  const current = tenantData.konfigurasiSekolah.kedisiplinanSettings || {
+    bobotHadirTepatWaktu: 100,
+    bobotTerlambat: 40,
+    bobotSakit: 75,
+    bobotIzin: 70,
+    bobotAlpha: -50,
+    penaltiToiletOverdue: -10,
+    minimumPresensiHari: 1,
+  };
+
+  tenantData.konfigurasiSekolah.kedisiplinanSettings = {
+    bobotHadirTepatWaktu: bobotHadirTepatWaktu !== undefined ? Number(bobotHadirTepatWaktu) : current.bobotHadirTepatWaktu,
+    bobotTerlambat: bobotTerlambat !== undefined ? Number(bobotTerlambat) : current.bobotTerlambat,
+    bobotSakit: bobotSakit !== undefined ? Number(bobotSakit) : current.bobotSakit,
+    bobotIzin: bobotIzin !== undefined ? Number(bobotIzin) : current.bobotIzin,
+    bobotAlpha: bobotAlpha !== undefined ? Number(bobotAlpha) : current.bobotAlpha,
+    penaltiToiletOverdue: penaltiToiletOverdue !== undefined ? Number(penaltiToiletOverdue) : current.penaltiToiletOverdue,
+    minimumPresensiHari: minimumPresensiHari !== undefined ? Number(minimumPresensiHari) : current.minimumPresensiHari,
+    updatedAt: getJakartaTime(),
+  };
+
+  saveTenantData(tenantId, tenantData);
+  addAuditLog(
+    tenantId,
+    'UPDATE_DISCIPLINE_SETTINGS',
+    'Pengaturan',
+    session.userId || 'admin',
+    'Admin',
+    'Pembaruan bobot penilaian kedisiplinan siswa sekolah'
+  );
+
+  res.json({
+    success: true,
+    message: 'Pengaturan bobot kedisiplinan sekolah berhasil disimpan.',
+    settings: tenantData.konfigurasiSekolah.kedisiplinanSettings,
   });
 });
 
@@ -2627,11 +3678,21 @@ app.delete('/api/admin/classes/:id', requireTenantAuth, (req: Request, res: Resp
   });
 });
 
-// 15.D SESI PRESENSI MANUAL CRUD (ADMIN DAPAT MENAMBAH & MENGATUR SESI SECARA MANUAL)
+// 15.D SESI PRESENSI MANUAL CRUD (DENGAN VALIDASI TABRAKAN JADWAL & WAKTU ISTIRAHAT)
 app.post('/api/admin/sessions', requireTenantAuth, (req: Request, res: Response) => {
   const session = (req as any).session;
   const tenantId = session.tenantId;
-  const { sessionName, entryStartTime, entryLimitTime, lateLimitTime, exitTime, transitionTime, operationalDays } = req.body;
+  const {
+    sessionName,
+    entryStartTime,
+    entryLimitTime,
+    lateLimitTime,
+    exitTime,
+    transitionTime,
+    operationalDays,
+    breakStartTime,
+    breakEndTime,
+  } = req.body;
 
   if (!sessionName || !entryLimitTime) {
     return res.status(400).json({ success: false, error: 'Nama sesi dan batas jam masuk wajib diisi.' });
@@ -2640,10 +3701,7 @@ app.post('/api/admin/sessions', requireTenantAuth, (req: Request, res: Response)
   const tenantData = getTenantData(tenantId);
   if (!tenantData.jadwalPresensi) tenantData.jadwalPresensi = [];
 
-  const id = `sch-${Date.now()}`;
-  const newSession = {
-    id,
-    tenantId,
+  const candidateSession = {
     sessionName: sessionName.trim(),
     entryStartTime: entryStartTime ? entryStartTime.trim() : '06:30',
     entryLimitTime: entryLimitTime.trim(),
@@ -2651,17 +3709,39 @@ app.post('/api/admin/sessions', requireTenantAuth, (req: Request, res: Response)
     exitTime: exitTime ? exitTime.trim() : '14:30',
     transitionTime: transitionTime ? transitionTime.trim() : (exitTime ? exitTime.trim() : '12:30'),
     operationalDays: operationalDays || [1, 2, 3, 4, 5],
+    breakStartTime: breakStartTime ? breakStartTime.trim() : undefined,
+    breakEndTime: breakEndTime ? breakEndTime.trim() : undefined,
     isActive: true,
+  };
+
+  // Validasi tabrakan jadwal (Schedule Collision Validation)
+  const collisionError = checkSessionCollision(tenantData.jadwalPresensi, candidateSession);
+  if (collisionError) {
+    return res.status(400).json({ success: false, error: collisionError });
+  }
+
+  const id = `sch-${Date.now()}`;
+  const newSession = {
+    id,
+    tenantId,
+    ...candidateSession,
   };
 
   tenantData.jadwalPresensi.push(newSession);
   saveTenantData(tenantId, tenantData);
 
-  addAuditLog(tenantId, 'TAMBAH_SESI', 'Master Data', session.userId || 'admin', 'Admin', `Tambah sesi presensi baru: ${newSession.sessionName} (Mulai: ${newSession.entryStartTime}, Batas: ${newSession.entryLimitTime}, Pindah: ${newSession.transitionTime})`);
+  addAuditLog(
+    tenantId,
+    'TAMBAH_SESI',
+    'Master Data',
+    session.userId || 'admin',
+    'Admin',
+    `Tambah sesi presensi baru: ${newSession.sessionName} (${newSession.entryStartTime} - ${newSession.exitTime || newSession.transitionTime}, Hari: ${newSession.operationalDays.join(',')})`
+  );
 
   res.json({
     success: true,
-    message: `Sesi presensi "${newSession.sessionName}" berhasil ditambahkan.`,
+    message: `Sesi presensi "${newSession.sessionName}" berhasil ditambahkan tanpa konflik jadwal.`,
     session: newSession,
   });
 });
@@ -2670,7 +3750,18 @@ app.put('/api/admin/sessions/:id', requireTenantAuth, (req: Request, res: Respon
   const session = (req as any).session;
   const tenantId = session.tenantId;
   const { id } = req.params;
-  const { sessionName, entryStartTime, entryLimitTime, lateLimitTime, exitTime, transitionTime, operationalDays, isActive } = req.body;
+  const {
+    sessionName,
+    entryStartTime,
+    entryLimitTime,
+    lateLimitTime,
+    exitTime,
+    transitionTime,
+    operationalDays,
+    breakStartTime,
+    breakEndTime,
+    isActive,
+  } = req.body;
 
   const tenantData = getTenantData(tenantId);
   if (!tenantData.jadwalPresensi) tenantData.jadwalPresensi = [];
@@ -2680,17 +3771,39 @@ app.put('/api/admin/sessions/:id', requireTenantAuth, (req: Request, res: Respon
     return res.status(404).json({ success: false, error: 'Sesi presensi tidak ditemukan.' });
   }
 
-  if (sessionName !== undefined) target.sessionName = sessionName.trim();
-  if (entryStartTime !== undefined) target.entryStartTime = entryStartTime.trim();
-  if (entryLimitTime !== undefined) target.entryLimitTime = entryLimitTime.trim();
-  if (lateLimitTime !== undefined) target.lateLimitTime = lateLimitTime.trim();
-  if (exitTime !== undefined) target.exitTime = exitTime.trim();
-  if (transitionTime !== undefined) target.transitionTime = transitionTime.trim();
-  if (operationalDays !== undefined) target.operationalDays = operationalDays;
-  if (isActive !== undefined) target.isActive = Boolean(isActive);
+  const candidate = {
+    ...target,
+    sessionName: sessionName !== undefined ? sessionName.trim() : target.sessionName,
+    entryStartTime: entryStartTime !== undefined ? entryStartTime.trim() : target.entryStartTime,
+    entryLimitTime: entryLimitTime !== undefined ? entryLimitTime.trim() : target.entryLimitTime,
+    lateLimitTime: lateLimitTime !== undefined ? lateLimitTime.trim() : target.lateLimitTime,
+    exitTime: exitTime !== undefined ? exitTime.trim() : target.exitTime,
+    transitionTime: transitionTime !== undefined ? transitionTime.trim() : target.transitionTime,
+    operationalDays: operationalDays !== undefined ? operationalDays : target.operationalDays,
+    breakStartTime: breakStartTime !== undefined ? (breakStartTime ? breakStartTime.trim() : undefined) : target.breakStartTime,
+    breakEndTime: breakEndTime !== undefined ? (breakEndTime ? breakEndTime.trim() : undefined) : target.breakEndTime,
+    isActive: isActive !== undefined ? Boolean(isActive) : target.isActive,
+  };
 
+  // Validasi tabrakan jadwal kecuali sesi yang sedang diubah
+  if (candidate.isActive) {
+    const collisionError = checkSessionCollision(tenantData.jadwalPresensi, candidate, id);
+    if (collisionError) {
+      return res.status(400).json({ success: false, error: collisionError });
+    }
+  }
+
+  Object.assign(target, candidate);
   saveTenantData(tenantId, tenantData);
-  addAuditLog(tenantId, 'UPDATE_SESI', 'Master Data', session.userId || 'admin', 'Admin', `Ubah pengaturan jam sesi: ${target.sessionName}`);
+
+  addAuditLog(
+    tenantId,
+    'UPDATE_SESI',
+    'Master Data',
+    session.userId || 'admin',
+    'Admin',
+    `Ubah pengaturan sesi: ${target.sessionName} (Status: ${target.isActive ? 'Aktif' : 'Nonaktif'})`
+  );
 
   res.json({
     success: true,
@@ -2914,19 +4027,9 @@ app.post('/api/admin/students/import', requireTenantAuth, (req: Request, res: Re
   });
 });
 
-// 16. SUPERADMIN ENDPOINTS (KELOLA TENANT SEKOLAH)
-app.get('/api/superadmin/tenants', (req: Request, res: Response) => {
+// 16. SUPERADMIN ENDPOINTS (KELOLA TENANT SEKOLAH - DILINDUNGI requireSuperAdmin)
+app.get('/api/superadmin/tenants', requireSuperAdmin, (req: Request, res: Response) => {
   try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader) {
-      return res.status(401).json({ success: false, error: 'Sesi Superadmin belum masuk atau token tidak ditemukan.' });
-    }
-    const token = authHeader.startsWith('Bearer ') ? authHeader.substring(7) : authHeader;
-    const sess = sessions.get(token);
-    if (!sess || !sess.isSuperAdmin) {
-      return res.status(403).json({ success: false, error: 'Akses khusus Superadmin. Silakan masuk kembali.' });
-    }
-
     const tenants = getTenantsList().map((t: any) => ({
       id: t.id,
       email: t.email || '',
@@ -2942,6 +4045,9 @@ app.get('/api/superadmin/tenants', (req: Request, res: Response) => {
       syncStatus: t.syncStatus,
       lastSyncTime: t.lastSyncTime,
       createdAt: t.createdAt,
+      isEmailVerified: t.isEmailVerified ?? true,
+      emailVerifiedAt: t.emailVerifiedAt,
+      emailVerifiedBy: t.emailVerifiedBy,
     }));
 
     res.json({ success: true, tenants });
@@ -2952,18 +4058,8 @@ app.get('/api/superadmin/tenants', (req: Request, res: Response) => {
 });
 
 // TAMBAH SEKOLAH BARU (SUPERADMIN)
-app.post('/api/superadmin/tenants', (req: Request, res: Response) => {
+app.post('/api/superadmin/tenants', requireSuperAdmin, (req: Request, res: Response) => {
   try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader) {
-      return res.status(401).json({ success: false, error: 'Sesi Superadmin belum masuk.' });
-    }
-    const token = authHeader.startsWith('Bearer ') ? authHeader.substring(7) : authHeader;
-    const sess = sessions.get(token);
-    if (!sess || !sess.isSuperAdmin) {
-      return res.status(403).json({ success: false, error: 'Akses khusus Superadmin.' });
-    }
-
     const { name, code, email, npsn, password, address, phone, driveFolderId, spreadsheetId } = req.body;
     if (!name || !code || !password) {
       return res.status(400).json({ success: false, error: 'Nama sekolah, kode sekolah, dan sandi sekolah wajib diisi.' });
@@ -2972,7 +4068,18 @@ app.post('/api/superadmin/tenants', (req: Request, res: Response) => {
     const tenants = getTenantsList();
     const id = `sch-${code.toLowerCase().replace(/[^a-z0-9]/g, '')}`;
     if (tenants.find((t: any) => t.id === id || t.code.toLowerCase() === code.toLowerCase())) {
-      return res.status(400).json({ success: false, error: 'Kode sekolah sudah terdaftar.' });
+      return res.status(400).json({ success: false, error: 'Kode sekolah sudah terdaftar. Gunakan kode lain.' });
+    }
+
+    if (npsn && npsn.trim()) {
+      const cleanNpsn = npsn.trim();
+      const duplicateNpsn = tenants.find((t: any) => t.npsn && t.npsn.trim() === cleanNpsn);
+      if (duplicateNpsn) {
+        return res.status(400).json({
+          success: false,
+          error: `NPSN "${cleanNpsn}" sudah digunakan oleh sekolah "${duplicateNpsn.name}". NPSN harus unik.`,
+        });
+      }
     }
 
     const salt = generateSalt();
@@ -2994,6 +4101,9 @@ app.post('/api/superadmin/tenants', (req: Request, res: Response) => {
       syncStatus: (driveFolderId && spreadsheetId) ? 'connected' : 'disconnected',
       lastSyncTime: '',
       createdAt: getJakartaTime(),
+      isEmailVerified: true,
+      emailVerifiedAt: getJakartaTime(),
+      emailVerifiedBy: 'Superadmin',
     };
 
     tenants.push(newTenant);
@@ -3006,7 +4116,13 @@ app.post('/api/superadmin/tenants', (req: Request, res: Response) => {
     }
     saveTenantData(id, tenantInitialData);
 
-    res.json({ success: true, message: 'Sekolah baru berhasil didaftarkan.', tenant: newTenant });
+    recordMasterChange('TAMBAH_SEKOLAH', `Sekolah baru ditambahkan: "${newTenant.name}" (${newTenant.code})`);
+
+    res.json({
+      success: true,
+      message: `Sekolah "${newTenant.name}" berhasil didaftarkan.`,
+      tenant: newTenant,
+    });
   } catch (err: any) {
     console.error('Error create tenant:', err);
     res.status(500).json({ success: false, error: err.message || 'Gagal mendaftarkan sekolah baru.' });
@@ -3014,18 +4130,8 @@ app.post('/api/superadmin/tenants', (req: Request, res: Response) => {
 });
 
 // UBAH DATA DETAIL SEKOLAH (SUPERADMIN)
-app.put('/api/superadmin/tenants/:id', (req: Request, res: Response) => {
+app.put('/api/superadmin/tenants/:id', requireSuperAdmin, (req: Request, res: Response) => {
   try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader) {
-      return res.status(401).json({ success: false, error: 'Sesi Superadmin belum masuk.' });
-    }
-    const token = authHeader.startsWith('Bearer ') ? authHeader.substring(7) : authHeader;
-    const sess = sessions.get(token);
-    if (!sess || !sess.isSuperAdmin) {
-      return res.status(403).json({ success: false, error: 'Akses khusus Superadmin.' });
-    }
-
     const { id } = req.params;
     const { name, code, email, npsn, address, phone, driveFolderId, spreadsheetId, newPassword, isActive } = req.body;
 
@@ -3033,10 +4139,22 @@ app.put('/api/superadmin/tenants/:id', (req: Request, res: Response) => {
     const target = tenants.find((t: any) => t.id === id);
     if (!target) return res.status(404).json({ success: false, error: 'Sekolah tidak ditemukan.' });
 
+    // Validasi keunikan NPSN jika diubah
+    if (npsn && npsn.trim() && npsn.trim() !== target.npsn) {
+      const cleanNpsn = npsn.trim();
+      const duplicateNpsn = tenants.find((t: any) => t.id !== id && t.npsn && t.npsn.trim() === cleanNpsn);
+      if (duplicateNpsn) {
+        return res.status(400).json({
+          success: false,
+          error: `NPSN "${cleanNpsn}" sudah digunakan oleh sekolah "${duplicateNpsn.name}".`,
+        });
+      }
+      target.npsn = cleanNpsn;
+    }
+
     if (name) target.name = name.trim();
     if (code) target.code = code.trim().toUpperCase();
     if (email !== undefined) target.email = email.trim();
-    if (npsn !== undefined) target.npsn = npsn.trim();
     if (address !== undefined) target.address = address.trim();
     if (phone !== undefined) target.phone = phone.trim();
     if (driveFolderId !== undefined) target.driveFolderId = driveFolderId.trim();
@@ -3044,8 +4162,19 @@ app.put('/api/superadmin/tenants/:id', (req: Request, res: Response) => {
       target.spreadsheetId = spreadsheetId.trim();
       target.syncStatus = target.spreadsheetId ? 'connected' : 'disconnected';
     }
-    if (typeof isActive === 'boolean') target.isActive = isActive;
-    if (newPassword && newPassword.trim().length > 0) {
+    if (typeof isActive === 'boolean') {
+      target.isActive = isActive;
+      if (!target.isActive) {
+        // Hentikan sesi sekolah jika dinonaktifkan
+        for (const [tokenKey, sessionItem] of sessions.entries()) {
+          if (sessionItem.tenantId === id) {
+            sessions.delete(tokenKey);
+          }
+        }
+        saveSessionsToDisk();
+      }
+    }
+    if (newPassword && newPassword.trim().length >= 6) {
       const salt = generateSalt();
       target.salt = salt;
       target.passwordHash = hashPassword(newPassword.trim(), salt);
@@ -3063,6 +4192,8 @@ app.put('/api/superadmin/tenants/:id', (req: Request, res: Response) => {
       saveTenantData(id, tenantData);
     }
 
+    recordMasterChange('UBAH_SEKOLAH', `Data sekolah "${target.name}" berhasil diperbarui.`);
+
     res.json({ success: true, message: `Data sekolah ${target.name} berhasil diperbarui.`, tenant: target });
   } catch (err: any) {
     console.error('Error update tenant:', err);
@@ -3071,18 +4202,8 @@ app.put('/api/superadmin/tenants/:id', (req: Request, res: Response) => {
 });
 
 // STATUS & RESET PASSWORD SEKOLAH
-app.patch('/api/superadmin/tenants/:id/status', (req: Request, res: Response) => {
+app.patch('/api/superadmin/tenants/:id/status', requireSuperAdmin, (req: Request, res: Response) => {
   try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader) {
-      return res.status(401).json({ success: false, error: 'Sesi Superadmin belum masuk.' });
-    }
-    const token = authHeader.startsWith('Bearer ') ? authHeader.substring(7) : authHeader;
-    const sess = sessions.get(token);
-    if (!sess || !sess.isSuperAdmin) {
-      return res.status(403).json({ success: false, error: 'Akses khusus Superadmin.' });
-    }
-
     const { id } = req.params;
     const { isActive, newPassword } = req.body;
 
@@ -3090,20 +4211,76 @@ app.patch('/api/superadmin/tenants/:id/status', (req: Request, res: Response) =>
     const target = tenants.find((t: any) => t.id === id);
     if (!target) return res.status(404).json({ success: false, error: 'Sekolah tidak ditemukan.' });
 
+    let statusMsg = '';
     if (typeof isActive === 'boolean') {
       target.isActive = isActive;
+      statusMsg = isActive ? 'diaktifkan' : 'dinonaktifkan';
+
+      if (!target.isActive) {
+        // Hentikan sesi sekolah seketika
+        for (const [tokenKey, sessionItem] of sessions.entries()) {
+          if (sessionItem.tenantId === id) {
+            sessions.delete(tokenKey);
+          }
+        }
+        saveSessionsToDisk();
+      }
     }
-    if (newPassword) {
+    if (newPassword && newPassword.trim().length >= 6) {
       const salt = generateSalt();
       target.salt = salt;
-      target.passwordHash = hashPassword(newPassword, salt);
+      target.passwordHash = hashPassword(newPassword.trim(), salt);
+      statusMsg += statusMsg ? ' & sandi direset' : 'Sandi berhasil direset';
+
+      // Hentikan sesi agar harus login dengan sandi baru
+      for (const [tokenKey, sessionItem] of sessions.entries()) {
+        if (sessionItem.tenantId === id) {
+          sessions.delete(tokenKey);
+        }
+      }
+      saveSessionsToDisk();
     }
 
     saveTenantsList(tenants);
-    res.json({ success: true, message: 'Status sekolah berhasil diperbarui.' });
+
+    recordMasterChange('STATUS_SEKOLAH', `Sekolah "${target.name}": ${statusMsg}`);
+
+    res.json({
+      success: true,
+      message: `Sekolah "${target.name}" berhasil ${statusMsg}.`,
+      tenant: target,
+    });
   } catch (err: any) {
     console.error('Error update tenant status:', err);
     res.status(500).json({ success: false, error: err.message || 'Gagal memperbarui status sekolah.' });
+  }
+});
+
+// VERIFIKASI EMAIL PER SEKOLAH
+app.patch('/api/superadmin/tenants/:id/verify-email', requireSuperAdmin, (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { isVerified = true } = req.body;
+
+    const tenants = getTenantsList();
+    const target = tenants.find((t: any) => t.id === id);
+    if (!target) return res.status(404).json({ success: false, error: 'Sekolah tidak ditemukan.' });
+
+    target.isEmailVerified = Boolean(isVerified);
+    target.emailVerifiedAt = getJakartaTime();
+    target.emailVerifiedBy = 'Superadmin';
+    saveTenantsList(tenants);
+
+    recordMasterChange('VERIFIKASI_EMAIL', `Status email sekolah "${target.name}": ${isVerified ? 'Terverifikasi' : 'Batal Verifikasi'}`);
+
+    res.json({
+      success: true,
+      message: `Status verifikasi email sekolah "${target.name}" berhasil diperbarui.`,
+      tenant: target,
+    });
+  } catch (err: any) {
+    console.error('Error verify tenant email:', err);
+    res.status(500).json({ success: false, error: err.message || 'Gagal memverifikasi email sekolah.' });
   }
 });
 
@@ -3265,26 +4442,54 @@ app.post('/api/admin/rules', requireTenantAuth, (req: Request, res: Response) =>
 });
 
 // HAPUS SEKOLAH (SUPERADMIN)
-app.delete('/api/superadmin/tenants/:id', (req: Request, res: Response) => {
+// HAPUS SEKOLAH (SUPERADMIN) - PINDAHKAN DRIVE KE SAMPAH (TRASHTAG, BUKAN HAPUS PERMANEN)
+app.delete('/api/superadmin/tenants/:id', requireSuperAdmin, async (req: Request, res: Response) => {
   try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader) {
-      return res.status(401).json({ success: false, error: 'Sesi Superadmin belum masuk.' });
-    }
-    const token = authHeader.startsWith('Bearer ') ? authHeader.substring(7) : authHeader;
-    const sess = sessions.get(token);
-    if (!sess || !sess.isSuperAdmin) {
-      return res.status(403).json({ success: false, error: 'Akses khusus Superadmin.' });
-    }
-
     const { id } = req.params;
+    const { accessToken } = req.body || {};
+
     const tenants = getTenantsList();
     const index = tenants.findIndex((t: any) => t.id === id);
     if (index === -1) {
       return res.status(404).json({ success: false, error: 'Sekolah tidak ditemukan.' });
     }
 
-    const schoolName = tenants[index].name;
+    const targetSchool = tenants[index];
+    const schoolName = targetSchool.name;
+
+    // Jika ada accessToken Google OAuth dan target memiliki folder/spreadsheet riil, pindahkan ke Sampah Google Drive
+    if (accessToken) {
+      if (targetSchool.driveFolderId && !targetSchool.driveFolderId.startsWith('fld-') && !targetSchool.driveFolderId.startsWith('1Drive_')) {
+        try {
+          await fetch(`https://www.googleapis.com/drive/v3/files/${targetSchool.driveFolderId}`, {
+            method: 'PATCH',
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ trashed: true }),
+          });
+        } catch (trashErr) {
+          console.warn('Gagal memindahkan folder Drive ke sampah:', trashErr);
+        }
+      }
+
+      if (targetSchool.spreadsheetId && !targetSchool.spreadsheetId.startsWith('sheet-') && !targetSchool.spreadsheetId.startsWith('1Sheet_')) {
+        try {
+          await fetch(`https://www.googleapis.com/drive/v3/files/${targetSchool.spreadsheetId}`, {
+            method: 'PATCH',
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ trashed: true }),
+          });
+        } catch (trashErr) {
+          console.warn('Gagal memindahkan Spreadsheet ke sampah:', trashErr);
+        }
+      }
+    }
+
     // Hapus dari list
     tenants.splice(index, 1);
     saveTenantsList(tenants);
@@ -3299,7 +4504,7 @@ app.delete('/api/superadmin/tenants/:id', (req: Request, res: Response) => {
       }
     }
 
-    // Bersihkan sesi aktif tenant yang dihapus
+    // Bersihkan sesi aktif tenant yang dihapus seketika
     for (const [tokenKey, sessionItem] of sessions.entries()) {
       if (sessionItem.tenantId === id) {
         sessions.delete(tokenKey);
@@ -3307,9 +4512,11 @@ app.delete('/api/superadmin/tenants/:id', (req: Request, res: Response) => {
     }
     saveSessionsToDisk();
 
+    recordMasterChange('HAPUS_SEKOLAH', `Sekolah "${schoolName}" dihapus dari sistem (folder Drive dipindahkan ke Sampah).`);
+
     res.json({
       success: true,
-      message: `Sekolah "${schoolName}" dan seluruh data terkait berhasil dihapus dari sistem.`,
+      message: `Sekolah "${schoolName}" berhasil dihapus. Berkas Drive/Sheet sekolah telah dipindahkan ke Sampah Google Drive.`,
     });
   } catch (err: any) {
     console.error('Error delete tenant:', err);

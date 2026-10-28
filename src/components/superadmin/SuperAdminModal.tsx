@@ -20,6 +20,7 @@ import {
   Building,
   Server,
   Sparkles,
+  Search,
 } from 'lucide-react';
 import { api, setSuperToken, getSuperToken, clearSuperToken } from '../../services/api';
 import { googleSignIn, getAccessToken } from '../../services/googleAuth';
@@ -80,11 +81,22 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
   const [changeSuperPassMsg, setChangeSuperPassMsg] = useState<{ text: string; isError: boolean } | null>(null);
   const [showSuperPassText, setShowSuperPassText] = useState(false);
 
+  // Master Google Sheets & Drive States (Section A, D, E)
+  const [masterConfig, setMasterConfig] = useState<any>(null);
+  const [masterSpreadsheetId, setMasterSpreadsheetId] = useState('');
+  const [masterDriveFolderId, setMasterDriveFolderId] = useState('');
+  const [isSavingMaster, setIsSavingMaster] = useState(false);
+  const [isSyncingMaster, setIsSyncingMaster] = useState(false);
+  const [showMasterSettings, setShowMasterSettings] = useState(false);
+  const [showChangeHistory, setShowChangeHistory] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+
   // Konfirmasi Hapus Sekolah
   const [deleteConfirmTenant, setDeleteConfirmTenant] = useState<any | null>(null);
 
   // Loading state pembuatan database otomatis
   const [creatingDbTenantId, setCreatingDbTenantId] = useState<string | null>(null);
+  const [isCreatingMasterDb, setIsCreatingMasterDb] = useState(false);
 
   useEffect(() => {
     if (isOpen) {
@@ -92,6 +104,7 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
       if (token) {
         setIsAuthenticated(true);
         loadTenants(token);
+        loadMasterConfig();
       } else {
         setIsAuthenticated(false);
       }
@@ -100,30 +113,43 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
 
   if (!isOpen) return null;
 
+  const loadMasterConfig = async () => {
+    try {
+      const res = await api.getSuperadminConfig();
+      if (res && res.success && res.config) {
+        setMasterConfig(res.config);
+        setMasterSpreadsheetId(res.config.masterSpreadsheetId || '');
+        setMasterDriveFolderId(res.config.masterDriveFolderId || '');
+      }
+    } catch (e) {
+      console.warn('Gagal memuat konfigurasi master:', e);
+    }
+  };
+
   const handleSuperLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError('');
     if (!superEmail.trim()) {
-      setAuthError('Email Superadmin wajib diisi.');
+      setAuthError('Email atau sandi salah');
       return;
     }
     if (!superPassword.trim()) {
-      setAuthError('Kata sandi Superadmin wajib diisi.');
+      setAuthError('Email atau sandi salah');
       return;
     }
 
     setIsLoading(true);
     try {
       const res = await api.loginSuperadmin(superPassword, superEmail.trim());
-      if (res.success && res.token) {
+      if (res && res.success && res.token) {
         setSuperToken(res.token);
         setIsAuthenticated(true);
-        await loadTenants(res.token);
+        await Promise.all([loadTenants(res.token), loadMasterConfig()]);
       } else {
-        setAuthError(res.error || 'Autentikasi gagal. Periksa kembali email dan sandi.');
+        setAuthError(res?.error || 'Email atau sandi salah');
       }
     } catch (e: any) {
-      setAuthError(e.message || 'Sandi atau Email Superadmin tidak valid.');
+      setAuthError(e.message || 'Email atau sandi salah');
     } finally {
       setIsLoading(false);
     }
@@ -146,7 +172,12 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
     }
   };
 
-  const handleSuperLogout = () => {
+  const handleSuperLogout = async () => {
+    try {
+      await api.logoutSuperadmin();
+    } catch (e) {
+      // ignore
+    }
     clearSuperToken();
     setIsAuthenticated(false);
     setTenants([]);
@@ -359,17 +390,95 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
     }
   };
 
+  const handleSaveMasterConfig = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsSavingMaster(true);
+    try {
+      const res = await api.saveSuperadminConfig({
+        masterSpreadsheetId: masterSpreadsheetId.trim(),
+        masterDriveFolderId: masterDriveFolderId.trim(),
+      });
+      if (res && res.success) {
+        setMasterConfig(res.config);
+        setActionFeedback({
+          text: 'Konfigurasi Google Sheets Master & Drive berhasil disimpan secara permanen.',
+          isError: false,
+        });
+        setShowMasterSettings(false);
+      }
+    } catch (err: any) {
+      setActionFeedback({
+        text: err.message || 'Gagal menyimpan konfigurasi master.',
+        isError: true,
+      });
+    } finally {
+      setIsSavingMaster(false);
+    }
+  };
+
+  const handleSyncMasterSheet = async () => {
+    setIsSyncingMaster(true);
+    try {
+      const accessToken = await getAccessToken().catch(() => null);
+      const res = await api.syncMasterSheet(accessToken || undefined, masterSpreadsheetId.trim() || undefined);
+      if (res && res.success) {
+        setActionFeedback({
+          text: res.message || 'Sinkronisasi ke Google Sheets Master berhasil.',
+          isError: false,
+        });
+        await Promise.all([loadMasterConfig(), loadTenants()]);
+      }
+    } catch (err: any) {
+      setActionFeedback({
+        text: err.message || 'Gagal menyinkronkan ke Master Sheet.',
+        isError: true,
+      });
+    } finally {
+      setIsSyncingMaster(false);
+    }
+  };
+
+  const handleAutoCreateMasterDatabase = async () => {
+    setIsCreatingMasterDb(true);
+    try {
+      const accessToken = await getAccessToken().catch(() => null);
+      const res = await api.autoCreateMasterDatabase(accessToken || undefined);
+      if (res && res.success) {
+        setMasterSpreadsheetId(res.masterSpreadsheetId || '');
+        setMasterDriveFolderId(res.masterDriveFolderId || '');
+        setActionFeedback({
+          text: res.message || 'Folder Drive dan Spreadsheet Master Superadmin berhasil dibuat otomatis!',
+          isError: false,
+        });
+        await Promise.all([loadMasterConfig(), loadTenants()]);
+      } else {
+        setActionFeedback({
+          text: res?.error || 'Gagal membuat database master otomatis.',
+          isError: true,
+        });
+      }
+    } catch (err: any) {
+      setActionFeedback({
+        text: err.message || 'Gagal membuat database master.',
+        isError: true,
+      });
+    } finally {
+      setIsCreatingMasterDb(false);
+    }
+  };
+
   const handleDeleteTenant = async (tenantId: string) => {
     setIsLoading(true);
     try {
-      const res = await api.deleteTenant(tenantId);
+      const accessToken = await getAccessToken().catch(() => null);
+      const res = await api.deleteTenant(tenantId, accessToken || undefined);
       if (res.success) {
         setActionFeedback({
-          text: res.message || 'Sekolah berhasil dihapus dari sistem.',
+          text: res.message || 'Sekolah berhasil dihapus dan dipindahkan ke Sampah Google Drive.',
           isError: false,
         });
         setDeleteConfirmTenant(null);
-        await loadTenants();
+        await Promise.all([loadTenants(), loadMasterConfig()]);
         if (onSchoolAdded) onSchoolAdded();
       }
     } catch (err: any) {
@@ -523,7 +632,66 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
             </div>
           ) : (
             <div className="space-y-6">
-              {/* Header Action */}
+              {/* STATUS CARDS SUPERADMIN DASHBOARD (Section E) */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl">
+                  <div className="flex items-center justify-between text-slate-500 mb-1">
+                    <span className="text-[11px] font-bold uppercase tracking-wider">Google Drive</span>
+                    <FolderPlus className="w-4 h-4 text-amber-600" />
+                  </div>
+                  <div className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
+                    <span className={`w-2 h-2 rounded-full ${masterConfig?.masterDriveFolderId ? 'bg-emerald-500' : 'bg-slate-400'}`} />
+                    <span>{masterConfig?.masterDriveFolderId ? 'Terhubung' : 'Siap Diatur'}</span>
+                  </div>
+                  <div className="text-[10px] text-slate-500 mt-0.5 truncate">
+                    {masterConfig?.masterDriveFolderId || 'Folder Master Cloud'}
+                  </div>
+                </div>
+
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl">
+                  <div className="flex items-center justify-between text-slate-500 mb-1">
+                    <span className="text-[11px] font-bold uppercase tracking-wider">Sheet Master</span>
+                    <Database className="w-4 h-4 text-emerald-600" />
+                  </div>
+                  <div className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
+                    <span className={`w-2 h-2 rounded-full ${masterConfig?.masterSpreadsheetId ? 'bg-emerald-500' : 'bg-indigo-500'}`} />
+                    <span>{masterConfig?.masterSpreadsheetId ? 'Master Cloud' : 'Server Utama'}</span>
+                  </div>
+                  <div className="text-[10px] text-slate-500 mt-0.5 truncate">
+                    {masterConfig?.masterSpreadsheetId ? 'Tersinkronkan' : 'Database Server'}
+                  </div>
+                </div>
+
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl">
+                  <div className="flex items-center justify-between text-slate-500 mb-1">
+                    <span className="text-[11px] font-bold uppercase tracking-wider">Tenant Sekolah</span>
+                    <Building className="w-4 h-4 text-indigo-600" />
+                  </div>
+                  <div className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                    <span>{tenants.filter((t) => t.isActive).length} / {tenants.length} Aktif</span>
+                  </div>
+                  <div className="text-[10px] text-slate-500 mt-0.5">
+                    Multi-Tenant Terisolasi
+                  </div>
+                </div>
+
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl">
+                  <div className="flex items-center justify-between text-slate-500 mb-1">
+                    <span className="text-[11px] font-bold uppercase tracking-wider">Versi Sistem</span>
+                    <Server className="w-4 h-4 text-indigo-600" />
+                  </div>
+                  <div className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
+                    <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+                    <span>v{masterConfig?.configVersion || 1}</span>
+                  </div>
+                  <div className="text-[10px] text-slate-500 mt-0.5 truncate">
+                    {masterConfig?.lastSyncTime ? new Date(masterConfig.lastSyncTime).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : 'Sinkron'}
+                  </div>
+                </div>
+              </div>
+
+              {/* Header Action & Sub-menu */}
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-200">
                 <div>
                   <div className="flex items-center gap-2">
@@ -533,12 +701,15 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
                     </span>
                   </div>
                   <p className="text-xs text-slate-500 mt-0.5">
-                    Superadmin: <strong className="text-slate-800">{superEmail}</strong> • Peraturan tiap sekolah terisolasi dan tidak saling menimpa.
+                    Superadmin: <strong className="text-slate-800">{superEmail}</strong> • Pengaturan tersimpan permanen & terbaca seluruh perangkat.
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                   <button
-                    onClick={() => loadTenants()}
+                    onClick={() => {
+                      loadTenants();
+                      loadMasterConfig();
+                    }}
                     disabled={isLoading}
                     className="px-3 py-1.5 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold rounded-lg border border-slate-300 transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
                   >
@@ -547,7 +718,41 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
                   </button>
                   <button
                     onClick={() => {
+                      setShowMasterSettings(!showMasterSettings);
+                      setShowChangeHistory(false);
+                      setShowAddForm(false);
+                      setShowChangeSuperPassword(false);
+                    }}
+                    className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition flex items-center gap-1.5 cursor-pointer ${
+                      showMasterSettings
+                        ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
+                        : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-300'
+                    }`}
+                  >
+                    <Database className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>Master Sheet & Drive</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      setShowChangeHistory(!showChangeHistory);
+                      setShowMasterSettings(false);
+                      setShowAddForm(false);
+                      setShowChangeSuperPassword(false);
+                    }}
+                    className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition flex items-center gap-1.5 cursor-pointer ${
+                      showChangeHistory
+                        ? 'bg-amber-50 text-amber-800 border-amber-300'
+                        : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-300'
+                    }`}
+                  >
+                    <Server className="w-3.5 h-3.5 text-amber-600" />
+                    <span>Riwayat Perubahan</span>
+                  </button>
+                  <button
+                    onClick={() => {
                       setShowChangeSuperPassword(!showChangeSuperPassword);
+                      setShowMasterSettings(false);
+                      setShowChangeHistory(false);
                       setShowAddForm(false);
                       setEditingTenant(null);
                     }}
@@ -558,11 +763,13 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
                     }`}
                   >
                     <Key className="w-3.5 h-3.5 text-indigo-600" />
-                    <span>Ubah Sandi / Akun</span>
+                    <span>Ubah Sandi</span>
                   </button>
                   <button
                     onClick={() => {
                       setShowAddForm(!showAddForm);
+                      setShowMasterSettings(false);
+                      setShowChangeHistory(false);
                       setShowChangeSuperPassword(false);
                       setEditingTenant(null);
                     }}
@@ -573,6 +780,128 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
                   </button>
                 </div>
               </div>
+
+              {/* Panel Pengaturan Master Google Sheets & Drive */}
+              {showMasterSettings && (
+                <div className="bg-emerald-50/70 border border-emerald-200 rounded-xl p-4 sm:p-5">
+                  <div className="flex items-center justify-between mb-3">
+                    <h5 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                      <Database className="w-4 h-4 text-emerald-600" />
+                      Konfigurasi Database Master Superadmin (Google Sheets & Drive)
+                    </h5>
+                    <button onClick={() => setShowMasterSettings(false)} className="text-slate-400 hover:text-slate-600 p-1 cursor-pointer">
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                  <p className="text-xs text-slate-600 mb-3">
+                    Google Sheets Master berfungsi sebagai sumber data konfigurasi global terpusat. Setiap perubahan Superadmin disimpan melalui backend ke Google Sheets Master dan otomatis disinkronkan ke seluruh HP & Laptop.
+                  </p>
+
+                  {/* Tombol Buat Database Master Otomatis (Drive & Sheet Induk) */}
+                  <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 p-3.5 bg-gradient-to-r from-emerald-500/10 via-emerald-50 to-teal-50 border border-emerald-300 rounded-xl mb-3 shadow-xs">
+                    <div>
+                      <span className="text-xs font-bold text-emerald-950 flex items-center gap-1.5">
+                        <Sparkles className="w-3.5 h-3.5 text-emerald-600" />
+                        Buat Database Folder & Sheet Master Otomatis
+                      </span>
+                      <span className="text-[11px] text-emerald-700 block mt-0.5">
+                        Sistem akan membuat Google Drive Folder dan Spreadsheet Induk registri multi-tenant secara otomatis tanpa konfigurasi manual.
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleAutoCreateMasterDatabase}
+                      disabled={isCreatingMasterDb}
+                      className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-bold text-xs flex items-center gap-1.5 shadow-xs cursor-pointer shrink-0 disabled:opacity-50 transition"
+                    >
+                      <Sparkles className={`w-3.5 h-3.5 ${isCreatingMasterDb ? 'animate-spin' : ''}`} />
+                      <span>{isCreatingMasterDb ? 'Membuat Database Master...' : '✨ Buat Database Master Otomatis'}</span>
+                    </button>
+                  </div>
+
+                  <form onSubmit={handleSaveMasterConfig} className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                    <div>
+                      <label className="block text-slate-700 font-bold mb-1">ID Google Sheet Master</label>
+                      <input
+                        type="text"
+                        value={masterSpreadsheetId}
+                        onChange={(e) => setMasterSpreadsheetId(e.target.value)}
+                        placeholder="Contoh: 1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms"
+                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-slate-900 font-mono text-[11px] focus:outline-none focus:ring-1 focus:ring-emerald-600"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-700 font-bold mb-1">ID Google Drive Folder Master</label>
+                      <input
+                        type="text"
+                        value={masterDriveFolderId}
+                        onChange={(e) => setMasterDriveFolderId(e.target.value)}
+                        placeholder="Contoh: 1Drive_Folder_Master_Root"
+                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-slate-900 font-mono text-[11px] focus:outline-none focus:ring-1 focus:ring-emerald-600"
+                      />
+                    </div>
+                    <div className="sm:col-span-2 flex flex-wrap items-center justify-between gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={handleSyncMasterSheet}
+                        disabled={isSyncingMaster}
+                        className="px-3 py-2 bg-white hover:bg-emerald-50 text-emerald-700 border border-emerald-300 rounded-lg font-semibold flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 ${isSyncingMaster ? 'animate-spin' : ''}`} />
+                        <span>{isSyncingMaster ? 'Menyinkronkan...' : 'Sinkronkan ke Google Sheets Master'}</span>
+                      </button>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setShowMasterSettings(false)}
+                          className="px-3 py-2 rounded-lg bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 font-semibold cursor-pointer"
+                        >
+                          Tutup
+                        </button>
+                        <button
+                          type="submit"
+                          disabled={isSavingMaster}
+                          className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold cursor-pointer shadow-xs disabled:opacity-50"
+                        >
+                          {isSavingMaster ? 'Menyimpan...' : 'Simpan Konfigurasi Master'}
+                        </button>
+                      </div>
+                    </div>
+                  </form>
+                </div>
+              )}
+
+              {/* Panel Riwayat Perubahan (Audit Log Superadmin) */}
+              {showChangeHistory && (
+                <div className="bg-amber-50/70 border border-amber-200 rounded-xl p-4 sm:p-5">
+                  <div className="flex items-center justify-between mb-3">
+                    <h5 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                      <Server className="w-4 h-4 text-amber-600" />
+                      Riwayat Perubahan Konfigurasi Sistem (Versi Terkini: v{masterConfig?.configVersion || 1})
+                    </h5>
+                    <button onClick={() => setShowChangeHistory(false)} className="text-slate-400 hover:text-slate-600 p-1 cursor-pointer">
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                  <div className="max-h-52 overflow-y-auto divide-y divide-amber-200/60 text-xs">
+                    {(masterConfig?.changeHistory || []).length === 0 ? (
+                      <p className="text-slate-500 py-3 text-center">Belum ada riwayat perubahan tercatat.</p>
+                    ) : (
+                      (masterConfig?.changeHistory || []).map((ch: any) => (
+                        <div key={ch.id} className="py-2 flex items-start justify-between gap-2">
+                          <div>
+                            <span className="font-bold text-slate-900">{ch.action}</span>: <span className="text-slate-700">{ch.detail}</span>
+                            <div className="text-[10px] text-slate-500 mt-0.5">Oleh: {ch.by}</div>
+                          </div>
+                          <span className="text-[10px] text-slate-500 font-mono shrink-0">
+                            {new Date(ch.timestamp).toLocaleString('id-ID')}
+                          </span>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              )}
 
               {/* Feedback Notifikasi Aksi */}
               {actionFeedback && (
@@ -986,6 +1315,28 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
                 </div>
               )}
 
+              {/* Search Bar & Informasi Daftar Sekolah */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div className="relative flex-1">
+                  <Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-400" />
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="Cari nama sekolah, NPSN, atau kode..."
+                    className="w-full pl-9 pr-3.5 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-indigo-600"
+                  />
+                </div>
+                <div className="text-xs text-slate-500 font-medium">
+                  Menampilkan {tenants.filter((t) =>
+                    t.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                    (t.npsn && t.npsn.includes(searchQuery)) ||
+                    t.code.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                    (t.email && t.email.toLowerCase().includes(searchQuery.toLowerCase()))
+                  ).length} dari {tenants.length} sekolah
+                </div>
+              </div>
+
               {/* Tabel Daftar Sekolah */}
               <div className="border border-slate-200 rounded-xl overflow-hidden bg-white shadow-xs">
                 <table className="w-full text-left text-xs text-slate-800">
@@ -999,7 +1350,12 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
-                    {tenants.map((t) => (
+                    {tenants.filter((t) =>
+                      t.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                      (t.npsn && t.npsn.includes(searchQuery)) ||
+                      t.code.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                      (t.email && t.email.toLowerCase().includes(searchQuery.toLowerCase()))
+                    ).map((t) => (
                       <tr key={t.id} className="hover:bg-slate-50 transition">
                         <td className="py-3 px-3 font-semibold text-slate-900">
                           <div className="flex items-center gap-1.5">
@@ -1143,12 +1499,12 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
                       <Trash2 className="w-5 h-5" />
                     </div>
                     <div className="flex-1 text-xs">
-                      <h5 className="font-bold text-rose-900 text-sm mb-1">Konfirmasi Hapus Sekolah Permanen</h5>
+                      <h5 className="font-bold text-rose-900 text-sm mb-1">Konfirmasi Hapus Sekolah (Pindah ke Sampah Google Drive)</h5>
                       <p className="text-rose-800 leading-relaxed">
-                        Apakah Anda yakin ingin menghapus sekolah <strong className="font-bold text-slate-950 underline">"{deleteConfirmTenant.name}"</strong> (Kode: {deleteConfirmTenant.code})?
+                        Apakah Anda yakin ingin menghapus sekolah <strong className="font-bold text-slate-950 underline">"{deleteConfirmTenant.name}"</strong> (NPSN: {deleteConfirmTenant.npsn || '-'}, Kode: {deleteConfirmTenant.code})?
                       </p>
                       <p className="text-rose-700 font-semibold mt-1">
-                        ⚠️ Seluruh data siswa, kelas, rekapitulasi presensi, izin kamar mandi, dan konfigurasi database sekolah ini akan dihapus secara permanen dari server.
+                        ⚠️ Baris sekolah akan dihapus dari registri sistem dan Google Sheets Master. Folder Google Drive dan file Spreadsheet sekolah akan dipindahkan ke <strong>Sampah Google Drive</strong> (bukan dihapus permanen) sehingga data tetap dapat dipulihkan jika sewaktu-waktu dibutuhkan.
                       </p>
                       <div className="flex items-center gap-2 mt-3">
                         <button
@@ -1156,7 +1512,7 @@ export const SuperAdminModal: React.FC<SuperAdminModalProps> = ({ isOpen, onClos
                           disabled={isLoading}
                           className="px-4 py-1.5 bg-rose-600 hover:bg-rose-700 text-white font-bold rounded-lg cursor-pointer transition shadow-xs disabled:opacity-50"
                         >
-                          {isLoading ? 'Menghapus...' : 'Ya, Hapus Sekolah Ini'}
+                          {isLoading ? 'Memindahkan ke Sampah...' : 'Ya, Pindahkan ke Sampah Drive'}
                         </button>
                         <button
                           onClick={() => setDeleteConfirmTenant(null)}
